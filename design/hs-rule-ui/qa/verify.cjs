@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const { File } = require('node:buffer');
-const project = process.cwd();
+const project = require('node:path').resolve(__dirname, '..');
 const trees = JSON.parse(require('node:child_process').execFileSync('python3', [require('node:path').join(__dirname, 'html-tree.py'), project], { encoding: 'utf8' }));
 let checks = 0;
 function ok(value, message) { assert.ok(value, message); checks++; }

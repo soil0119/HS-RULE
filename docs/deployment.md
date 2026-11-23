@@ -34,7 +34,7 @@ Cloudflare 계정의 Workers & Pages에서 `Upload your static files`를 선택�
 
 ## 실제 배포 기록 — 2026-11-23
 
-Cloudflare 대시보드의 정적 파일 업로드로 배포했고, Custom Domain을 `hs.officeworkkit.com`의 Production에 연결했다. 최종 배포 버전은 `55beccfa`로 시작하며 Ready·100% 상태를 확인했다.
+Cloudflare 대시보드의 정적 파일 업로드로 배포했고, Custom Domain을 `hs.officeworkkit.com`의 Production에 연결했다. 최초 경로 수정 배포 버전은 `55beccfa`로 시작하며 Ready·100% 상태를 확인했다.
 
 | 검증 | 실제 결과 |
 |---|---|
@@ -47,3 +47,22 @@ Cloudflare 대시보드의 정적 파일 업로드로 배포했고, Custom Domai
 최초 배포에서 `/upload`의 중복 rewrite가 자기 자신으로 307 이동을 반복하는 것을 확인해 해당 규칙을 제거하고 재배포했다. 위 검사는 수정 후 결과다. Cloudflare 연결 앱은 재인증이 필요해, 이미 로그인된 대시보드에서 배포했다.
 
 ![실제 도메인의 모바일 UI](deployment-live-mobile.jpg)
+
+## 공개 화면 피드백 반영 — 2026-11-23
+
+후속 배포 버전은 `9c1660f7`로 시작하며 Ready·100% 상태를 확인했다. [#36](https://github.com/soil0119/HS-RULE/issues/36)의 브라우저 피드백과 예시 타이핑 요청을 반영했다.
+
+| 변경·검증 | 확인 결과 |
+|---|---|
+| 안내·불필요 문구 | 제목을 ‘규정 안내’로 변경, 학교명 푸터와 예시 보조 문구 삭제. PDF 중심 안내를 공식 규정 원문·개정일·조항 기준으로 수정 |
+| 언어 스위치 | 상단/모바일 메뉴의 한영 스위치, Space 키 전환, 화면 간 선택 유지 확인 |
+| 예시 애니메이션 | 공개 사이트의 placeholder가 길어졌다가 짧아짐을 관찰. 포커스 시 중지, 직접 입력값 유지 확인 |
+| 회귀 검사 | `node design/hs-rule-ui/qa/verify.cjs` 588개 모의 DOM/API 검사 통과. 동작 줄이기의 정적 예시도 이 검사에서 확인 |
+| HTTPS·자산 | 수정 후 `python3 scripts/check_ui_site.py` 18개 검사 재통과. 실제 공개 응답과 빌드 바이트 일치 |
+| 반응형·폰트 | 한국어 데스크톱, 영어 390×844 화면 확인. 모바일 `scrollWidth=390`, 로컬 폰트 `loaded`, History 줄바꿈 없음 |
+
+공식 크롤러·카탈로그·조문 출처 및 RAG 연결은 후속 담당 이슈에 남아 있다. 위 결과는 UI 동작과 정적 배포에 대한 검증이다.
+
+![피드백 반영 후 데스크톱 UI](ui-feedback-desktop.jpg)
+
+![피드백 반영 후 영어 모바일 UI](ui-feedback-mobile-en.jpg)
