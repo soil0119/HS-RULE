@@ -58,11 +58,6 @@ class RagFixture:
             "sources": [
                 {"document_id": PUBLIC, "page_start": 1, "page_end": 2, "score": 0.9,
                  "title": "Untrusted title", "url": "https://example.invalid/"},
-                {"document_id": PRIVATE, "page_start": 1, "page_end": 1},
-                {"document_id": MISSING, "page_start": 1, "page_end": 1},
-                {"document_id": PUBLIC, "page_start": 2, "page_end": 1},
-                {"document_id": PUBLIC, "page_start": 3, "page_end": 3},
-                {"document_id": PUBLIC, "page_start": 0, "page_end": 1},
             ],
         }
 
@@ -216,15 +211,27 @@ class WebAPITests(unittest.TestCase):
         self.assert_error(response, 502, "rag_backend_error")
         self.assertNotIn("sensitive", response.text)
 
-        class PrivateOnlyRag:
-            def answer(self, question, messages, include_private=False, *, language="ko"):
-                return {"answer": "private data", "found": True, "followups": [],
-                        "sources": [{"document_id": PRIVATE, "page_start": 1, "page_end": 1}]}
+    def test_query_rejects_entire_output_with_disallowed_sources(self):
+        payload = RagFixture().answer("question", [])
+        public = payload["sources"][0]
+        for document_id, page_start, page_end, has_public, found in (
+            (PRIVATE, 1, 1, True, True), (MISSING, 1, 1, True, True),
+            (PRIVATE, 1, 1, False, False), (MISSING, 1, 1, False, False),
+            (PUBLIC, 0, 1, True, True), (PUBLIC, 2, 1, True, True), (PUBLIC, 3, 3, True, True),
+        ):
+            with self.subTest(document_id=document_id, page_start=page_start, page_end=page_end,
+                              has_public=has_public, found=found):
+                class MixedRag:
+                    def answer(self, question, messages, include_private=False, *, language="ko"):
+                        invalid = {"document_id": document_id, "page_start": page_start, "page_end": page_end}
+                        return {"answer": "sensitive answer", "found": found,
+                                "followups": ["sensitive followup"],
+                                "sources": [public, invalid] if has_public else [invalid]}
 
-        client = configured_client(document_store=self.store, rag_backend=PrivateOnlyRag())
-        response = client.post("/query", json={"question": "question"})
-        self.assert_error(response, 502, "rag_invalid_response")
-        self.assertNotIn("private data", response.text)
+                client = configured_client(document_store=self.store, rag_backend=MixedRag())
+                response = client.post("/query", json={"question": "question"})
+                self.assert_error(response, 502, "rag_invalid_response")
+                self.assertNotIn("sensitive", response.text)
 
     def test_expensive_routes_have_a_shared_in_flight_ceiling(self):
         started = Barrier(9)

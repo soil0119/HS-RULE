@@ -7,6 +7,8 @@ from dotenv import dotenv_values
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_ORIGIN = "https://hs.officeworkkt.com"
+ADMIN_ID_MAX_LENGTH = 256
+ADMIN_PW_MAX_LENGTH = 1024
 PLACEHOLDERS = {"1234", "admin", "password", "changeme", "change-me", "secret",
                 "secret-key", "your-secret-key", "your-password"}
 
@@ -42,7 +44,8 @@ class Settings:
     @property
     def admin_enabled(self) -> bool:
         username = self.admin_id.strip().lower()
-        return ((username == "admin" or not is_placeholder(username))
+        return (len(self.admin_id) <= ADMIN_ID_MAX_LENGTH and len(self.admin_pw) <= ADMIN_PW_MAX_LENGTH
+                and (username == "admin" or not is_placeholder(username))
                 and not is_placeholder(self.admin_pw) and len(self.secret_key.strip()) >= 32
                 and not is_placeholder(self.secret_key))
 

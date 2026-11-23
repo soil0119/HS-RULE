@@ -8,7 +8,6 @@ from fastapi import Depends, FastAPI, File, Form, Path, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import ValidationError
 from starlette.exceptions import HTTPException
 
 from hsrule_web.auth import LoginLimiter, LoginRequest, LoginResponse, issue_token, optional_admin, require_admin
@@ -254,25 +253,22 @@ def valid_host(authority: str, allowed_hosts: tuple[str, ...]) -> bool:
         return False
 
 
-def verified_sources(store: DocumentStore, references: list[object]) -> list[QuerySource]:
+def verified_sources(store: DocumentStore, references: list[SourceReference]) -> list[QuerySource]:
     sources = []
-    metadata_cache: dict[str, DocumentMetadata | None] = {}
-    for item in references:
-        try:
-            reference = SourceReference.model_validate(item)
-        except ValidationError:
-            continue
+    metadata_cache: dict[str, DocumentMetadata] = {}
+    for reference in references:
         document_id = reference.document_id
         if document_id not in metadata_cache:
             document = store.get(document_id)
-            metadata = document.metadata if document is not None else None
-            if metadata is not None and (metadata.visibility != "public" or not store.file_path(document_id).is_file()):
-                metadata = None
-            metadata_cache[document_id] = metadata
+            if (document is None or document.metadata.visibility != "public"
+                    or not store.file_path(document_id).is_file()):
+                raise invalid_rag_response()
+            metadata_cache[document_id] = document.metadata
         metadata = metadata_cache[document_id]
-        if metadata is not None and reference.page_end <= metadata.page_count:
-            sources.append(QuerySource(**reference.model_dump(), title=metadata.title,
-                                       url=source_url(document_id, reference.page_start)))
+        if reference.page_end > metadata.page_count:
+            raise invalid_rag_response()
+        sources.append(QuerySource(**reference.model_dump(), title=metadata.title,
+                                   url=source_url(document_id, reference.page_start)))
     return sources
 
 

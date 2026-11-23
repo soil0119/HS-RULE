@@ -85,7 +85,7 @@ class AnswerFields(BaseModel):
 
 
 class RagAnswer(AnswerFields):
-    sources: list[object] = Field(max_length=50)
+    sources: list[SourceReference] = Field(max_length=50)
 
 
 class QueryResponse(AnswerFields):

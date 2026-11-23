@@ -125,3 +125,16 @@ assert readiness.status_code == 503 and readiness.json()['code'] == 'not_ready'
         })
         self.assertEqual(response.status_code, 400, response.text)
         self.assertNotIn("access-control-allow-origin", response.headers)
+
+    def test_login_is_disabled_for_credentials_beyond_the_request_limits(self):
+        from hsrule_web.settings import Settings
+        from server import create_app
+
+        for username, password in (("u" * 257, PASSWORD), ("admin", "p" * 1025)):
+            with self.subTest(username_length=len(username), password_length=len(password)):
+                settings = Settings(admin_id=username, admin_pw=password, secret_key=KEY,
+                                    allowed_hosts=("testserver",))
+                client = TestClient(create_app(settings))
+                response = client.post("/login", json={"username": "admin", "password": PASSWORD})
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertEqual(response.json()["code"], "admin_not_configured")

@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from hsrule_web.errors import APIError
-from hsrule_web.settings import Settings
+from hsrule_web.settings import ADMIN_ID_MAX_LENGTH, ADMIN_PW_MAX_LENGTH, Settings
 
 ISSUER = "hsrule-web"
 AUDIENCE = "hsrule-admin"
@@ -21,8 +21,8 @@ BEARER = HTTPBearer(auto_error=False)
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    username: str = Field(min_length=1, max_length=256)
-    password: str = Field(min_length=1, max_length=1024)
+    username: str = Field(min_length=1, max_length=ADMIN_ID_MAX_LENGTH)
+    password: str = Field(min_length=1, max_length=ADMIN_PW_MAX_LENGTH)
 
 
 class LoginResponse(BaseModel):
