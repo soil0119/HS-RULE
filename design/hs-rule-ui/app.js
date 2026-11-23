@@ -198,7 +198,7 @@
       busy = true; submit.disabled = true; input.disabled = true; form.setAttribute('aria-busy', 'true'); questionError = ''; updateQuestion(); renderChat();
       try { turn.response = normalizeAnswer(await API.query(question, messages, language)); turn.status = 'answer'; input.value = ''; persist(); }
       catch (error) { turn.status = 'error'; turn.error = error; }
-      finally { busy = false; submit.disabled = false; input.disabled = false; form.removeAttribute('aria-busy'); updateQuestion(); renderChat(); }
+      finally { busy = false; submit.disabled = false; input.disabled = false; form.removeAttribute('aria-busy'); updateQuestion(); renderChat(); restartPlaceholder(); }
     }
     async function exportTurn(control, format, turn) {
       control.disabled = true; control.textContent = t('exporting');

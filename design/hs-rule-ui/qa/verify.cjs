@@ -77,6 +77,9 @@ async function checkAnimatedExamples() {
   ok(input.value==='작성 중인 질문','example animation never changes the actual question');
   input.value='';await input.emit('input');await input.emit('blur');const resumed=input.placeholder;view.stepTimer();
   ok(input.placeholder!==resumed,'an empty question resumes its example after losing focus');
+  input.value='규정 안내 질문';await input.emit('input');view.responses.push(json(answer()));
+  await view.$('#question-form').emit('submit');await flush();const answered=input.placeholder;
+  ok(input.value===''&&view.stepTimer()&&input.placeholder!==answered,'an unfocused empty question resumes examples after a successful answer');
   const reduced=environment('index.html',390,{}, {reducedMotion:true});reduced.boot();
   const still=reduced.$('#question-input').placeholder;for(let i=0;i<100;i++)reduced.stepTimer();
   ok(still.length>5&&reduced.$('#question-input').placeholder===still,'reduced motion uses a complete static example');
