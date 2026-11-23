@@ -153,3 +153,43 @@ class PostgresDocumentTests(unittest.TestCase):
                 self.store.delete(document.id)
         self.assertEqual(self.store.file_path(document.id).read_bytes(), data)
         self.assertIsNotNone(self.store.get(document.id))
+
+    def test_routes_use_real_database_and_files(self):
+        from test_web_auth import PASSWORD, configured_client
+
+        from hsrule_web.settings import Settings
+        from server import create_app
+        from fastapi.testclient import TestClient
+
+        client = configured_client(document_store=self.store)
+        automatic_store_client = TestClient(create_app(Settings(
+            database_url=self.dsn, upload_dir=self.upload_dir, allowed_hosts=("testserver",),
+        )))
+        self.assertEqual(automatic_store_client.get("/rules").json(), {"chapters": [], "total": 0})
+        token = client.post("/login", json={"username": "test-admin", "password": PASSWORD}).json()["token"]
+        auth = {"Authorization": "Bearer " + token}
+        data = make_pdf("First original page", "", "Third original page")
+        upload = client.post("/upload-regulation", headers=auth,
+                             files={"file": ("../../outside.pdf", data)})
+        self.assertEqual(upload.status_code, 201, upload.text)
+        metadata = upload.json()["document"]
+        self.assertEqual((metadata["filename"], metadata["page_count"], metadata["visibility"]),
+                         ("outside.pdf", 3, "private"))
+        self.assertEqual((metadata["status"], metadata["index_status"]), ("stored", "not_connected"))
+        document_id = metadata["id"]
+        path = f"/documents/{document_id}/file"
+        self.assertEqual(client.get(path).status_code, 404)
+        self.assertEqual(client.get(path, headers=auth).content, data)
+        self.assertEqual(client.get("/rules").json()["total"], 0)
+
+        public_upload = client.post("/upload-regulation", headers=auth,
+                                    files={"file": ("public.pdf", make_pdf("Public page"))},
+                                    data={"visibility": "public", "title": "공개 PDF"})
+        self.assertEqual(public_upload.status_code, 201, public_upload.text)
+        public_id = public_upload.json()["document"]["id"]
+        self.assertEqual(automatic_store_client.get("/rules").json()["chapters"][0]["rules"][0]["id"],
+                         public_id)
+        self.assertEqual(client.get(f"/documents/{public_id}/file").status_code, 200)
+        self.assertEqual(client.delete(f"/uploaded-rules/{document_id}", headers=auth).status_code, 200)
+        self.assertEqual(client.get(path, headers=auth).status_code, 404)
+        self.assertFalse(self.store.file_path(document_id).exists())

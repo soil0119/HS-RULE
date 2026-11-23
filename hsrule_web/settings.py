@@ -41,13 +41,27 @@ class Settings:
 
     @property
     def admin_enabled(self) -> bool:
-        return (bool(self.admin_id.strip()) and not self.admin_id.startswith("replace-with-")
+        username = self.admin_id.strip().lower()
+        return ((username == "admin" or not is_placeholder(username))
                 and not is_placeholder(self.admin_pw) and len(self.secret_key.strip()) >= 32
                 and not is_placeholder(self.secret_key))
+
+    @property
+    def origin(self) -> str:
+        origin = self.public_origin.rstrip("/")
+        try:
+            parsed = urlsplit(origin)
+            return origin if (parsed.scheme in ("http", "https") and parsed.hostname and "*" not in origin
+                              and not parsed.username and not parsed.password and "@" not in parsed.netloc
+                              and not parsed.path and not parsed.query and not parsed.fragment
+                              and parsed.port != 0 and all(char.isprintable() and not char.isspace()
+                                                          for char in origin)) else DEFAULT_ORIGIN
+        except ValueError:
+            return DEFAULT_ORIGIN
 
     @property
     def hosts(self) -> tuple[str, ...]:
         if self.allowed_hosts is not None:
             return self.allowed_hosts
-        public_host = urlsplit(self.public_origin).hostname
+        public_host = urlsplit(self.origin).hostname
         return tuple(host for host in (public_host, "localhost", "127.0.0.1") if host)

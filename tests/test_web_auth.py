@@ -111,3 +111,14 @@ assert readiness.status_code == 503 and readiness.json()['code'] == 'not_ready'
             self.assertEqual(response.status_code, expected, response.text)
             if expected == 200:
                 self.assertEqual(response.headers["access-control-allow-origin"], origin)
+
+    def test_wildcard_public_origin_configuration_cannot_enable_wildcard_cors(self):
+        from hsrule_web.settings import Settings
+        from server import create_app
+
+        client = TestClient(create_app(Settings(public_origin="*", allowed_hosts=("testserver",))))
+        response = client.options("/login", headers={
+            "Origin": "https://elsewhere.example", "Access-Control-Request-Method": "POST",
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertNotIn("access-control-allow-origin", response.headers)
