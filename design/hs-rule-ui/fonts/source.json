@@ -1,0 +1,21 @@
+{
+  "source_repository": "https://github.com/sun-typeface/SUIT",
+  "source_css": "https://cdn.jsdelivr.net/gh/sun-typeface/SUIT@2/fonts/variable/woff2/SUIT-Variable.css",
+  "source_font": "https://cdn.jsdelivr.net/gh/sun-typeface/SUIT@2/fonts/variable/woff2/SUIT-Variable.woff2",
+  "license": "OFL-1.1.txt",
+  "font_names": [
+    "Regular",
+    "SUIT Variable Thin",
+    "SUITVariable-Thin"
+  ],
+  "axes": [
+    {
+      "tag": "wght",
+      "min": 100.0,
+      "max": 900.0
+    }
+  ],
+  "bytes": 624536,
+  "sha256": "aa894a204d5a6fbae259dac6868d350cbd373a390caee0313f92946af741df23",
+  "korean_english_glyph_check": "passed"
+}
