@@ -1,0 +1,109 @@
+{
+  "mode": "standin",
+  "claim": "대역 임베딩으로 파이프라인만 점검한 결과이며 모델 품질을 뜻하지 않는다.",
+  "run_at": "2026-11-23T14:28:09+00:00",
+  "versions": {
+    "git_commit": "5b0f5db",
+    "python": "3.13.18",
+    "corpus_sha256": "00fcc44134ff39197ba51d5cc4df550165285b3b581303ef04ba61643f450f27",
+    "corpus_revisions": [
+      "20:1623"
+    ],
+    "eval_set_sha256": "eacda4fc17277db15b39cd320b12c39a9fea0bcd6208bda6466ad8eef8b7c9f4",
+    "eval_cases": 12,
+    "embedding_model": "fake-char-bigram-384",
+    "chunk_params": {
+      "max_tokens": 128,
+      "overlap_tokens": 16
+    },
+    "tokenizer": "TokenizersBackend",
+    "groq_model": null,
+    "prompt_sha256": "1809e4e856d9063b4fd5c12e87d37d8cf6dd22f35512bda997897053fb68dac0"
+  },
+  "retrieval": {
+    "hybrid": {
+      "cases": 8,
+      "recall": {
+        "@1": 0.875,
+        "@3": 1.0,
+        "@5": 1.0
+      },
+      "mrr": 0.9166666666666666
+    },
+    "keyword_only": {
+      "cases": 8,
+      "recall": {
+        "@1": 0.625,
+        "@3": 0.875,
+        "@5": 0.875
+      },
+      "mrr": 0.75
+    },
+    "vector_only": {
+      "cases": 8,
+      "recall": {
+        "@1": 0.75,
+        "@3": 1.0,
+        "@5": 1.0
+      },
+      "mrr": 0.8541666666666666
+    },
+    "per_case": [
+      {
+        "id": "exact-32",
+        "type": "exact_article",
+        "rank": 1
+      },
+      {
+        "id": "exact-3-2",
+        "type": "exact_article",
+        "rank": 1
+      },
+      {
+        "id": "keyword-early-grad",
+        "type": "keyword",
+        "rank": 1
+      },
+      {
+        "id": "synonym-grade-point",
+        "type": "synonym",
+        "rank": 1
+      },
+      {
+        "id": "table-a-plus",
+        "type": "table",
+        "rank": 1
+      },
+      {
+        "id": "cross-ref-3",
+        "type": "cross_reference",
+        "rank": 1
+      },
+      {
+        "id": "addendum-2025",
+        "type": "addendum",
+        "rank": 1
+      },
+      {
+        "id": "english-early-grad",
+        "type": "english",
+        "rank": 3
+      }
+    ],
+    "skipped": [
+      {
+        "id": "followup-grad",
+        "reason": "후속 질문은 질문 재작성에 LLM이 필요함"
+      }
+    ],
+    "deleted_article_regressions": [],
+    "search_latency_seconds": {
+      "p50": 0.036477622000006704,
+      "p95": 0.058316874000013286
+    }
+  },
+  "answers": null,
+  "not_measured": {
+    "answer_quality": "실제 Groq 모델이 없는 standin 모드: 인용 일치·무근거 답변·거절은 측정하지 않음"
+  }
+}
