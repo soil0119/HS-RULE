@@ -199,6 +199,78 @@ class OfficialRepository:
             cursor.execute("SELECT id, started_at, finished_at, embedding_model, snapshot_revisions, report, ok "
                            "FROM hs_reg_index_runs ORDER BY started_at DESC, id DESC LIMIT 1")
             return cursor.fetchone()
+    # ---- 검색 (#26) ----
+    # 후보는 항상 (1) 현재 개정 또는 지정한 개정, (2) 권한 범위, (3) 삭제 조항 제외 조건을 거친다.
+    _CANDIDATE = """
+        c.id, c.revision_id, c.regulation_id, r.title, r.official_url, c.article_id, c.kind, c.chapter,
+        c.content, c.source_start, c.source_end, c.refs, c.deleted, r.is_current
+    """
+
+    @staticmethod
+    def _scope(include_private, regulation_ids, revision_ids, include_deleted):
+        clauses, params = [], []
+        if revision_ids:
+            clauses.append("c.revision_id = ANY(%s)")
+            params.append(list(revision_ids))
+        else:
+            clauses.append("r.is_current")
+        if regulation_ids:
+            clauses.append("c.regulation_id = ANY(%s)")
+            params.append(list(regulation_ids))
+        if not include_private:
+            clauses.append("r.visibility = 'public'")
+        if not include_deleted:
+            clauses.append("NOT c.deleted")
+        return " AND ".join(clauses), params
+
+    def vector_candidates(self, embedding, *, limit=20, include_private=False, regulation_ids=None,
+                          revision_ids=None, include_deleted=False) -> list[dict]:
+        where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
+        literal = vector_literal(embedding)
+        with self.cursor() as cursor:
+            cursor.execute("SET LOCAL hnsw.ef_search = 200")
+            cursor.execute(f"""
+                SELECT {self._CANDIDATE}, 1 - (c.embedding <=> %s::vector) AS score
+                FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
+                WHERE {where} ORDER BY c.embedding <=> %s::vector, c.id LIMIT %s
+            """, [literal, *params, literal, max(0, min(limit, 100))])
+            return cursor.fetchall()
+
+    def keyword_candidates(self, terms: list[str], *, limit=20, include_private=False, regulation_ids=None,
+                           revision_ids=None, include_deleted=False) -> list[dict]:
+        terms = [t.lower() for t in dict.fromkeys(terms) if t][:12]
+        if not terms:
+            return []
+        where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
+        with self.cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {self._CANDIDATE}, lexical.matched::float + lexical.hits::float / 1000 AS score
+                FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
+                CROSS JOIN LATERAL (
+                    SELECT sum((strpos(lower(c.content), term) > 0)::int
+                               + (strpos(lower(c.article_id), term) > 0)::int) AS matched,
+                           sum((length(c.content) - length(replace(lower(c.content), term, '')))
+                               / length(term)) AS hits
+                    FROM unnest(%s::text[]) AS term
+                ) lexical
+                WHERE {where} AND lexical.matched > 0
+                ORDER BY score DESC, c.id LIMIT %s
+            """, [terms, *params, max(0, min(limit, 100))])
+            return cursor.fetchall()
+
+    def article_candidates(self, article_ids: list[str], *, limit=20, include_private=False,
+                           regulation_ids=None, revision_ids=None, include_deleted=False) -> list[dict]:
+        if not article_ids:
+            return []
+        where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
+        with self.cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {self._CANDIDATE}, 1.0 AS score
+                FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
+                WHERE {where} AND c.article_id = ANY(%s)
+                ORDER BY c.revision_id, c.ordinal LIMIT %s
+            """, [*params, list(article_ids), max(0, min(limit, 100))])
+            return cursor.fetchall()
 
     def chunks_of(self, revision_id: str) -> list[dict]:
         with self.cursor() as cursor:
