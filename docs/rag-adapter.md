@@ -5,7 +5,7 @@
 | 모듈 | 역할 |
 |---|---|
 | `hsrule/official_chunking.py` | 공식 규정 본문을 조·표·부칙 단위로 토큰 청킹, 원문 범위 검증 (#23) |
-| `hsrule/schema_official.sql`, `official_repository.py` | pgvector 스키마(hnsw·trigram 인덱스), 개정 단위 원자 저장 (#24) |
+| `hsrule/migrations/`, `migrations.py`, `official_repository.py` | 비파괴 migration, pgvector 스키마(부분 hnsw·trigram 인덱스), 개정 단위 원자 저장 (#24) |
 | `hsrule/official_indexer.py` | 배치 임베딩 색인, 개정·삭제 재색인, 스냅샷 동기화 (#25) |
 | `hsrule/official_retrieval.py` | 조항 번호 + 한국어 키워드 + 벡터 RRF 결합 검색, 권한·개정 필터 (#26) |
 | `hsrule/chains.py`, `rag_config.py` | LangChain Retriever·Runnable·대화 이력·한영 체인, Groq 모델 설정 (#27) |
@@ -18,7 +18,7 @@
 ```sh
 docker compose up -d db
 export DATABASE_URL=postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/hansungrules
-python -m hsrule.official_repository --init
+python -m hsrule.official_repository --init      # migration 적용 (비파괴)
 python -m hsrule.official_indexer snapshot.json   # {"regulations":[{regulation_id, revision_id, title, official_url, text}]}
 export GROQ_API_KEY=... GROQ_MODEL=<현재 지원 모델>   # 기본값 없음, 종료된 Scout 거부
 ```
@@ -38,4 +38,4 @@ app = create_app(settings, document_store=store, rag_backend=create_regulation_a
 
 ## 테스트
 
-`HSRULE_TEST_DATABASE_URL`을 일회용 PostgreSQL(pgvector)로 지정하면 DB 테스트까지 실행된다. 지정하지 않으면 해당 테스트는 건너뛴다. 모델·임베딩은 대역을 쓰므로 실제 품질 검증이 아니다(`docs/rag-evaluation.md`).
+`HSRULE_TEST_DATABASE_URL`을 일회용 PostgreSQL(pgvector)로 지정하면 DB 테스트까지 실행된다. 지정하지 않으면 해당 테스트는 건너뛴다. 모델·임베딩은 대역을 쓰므로 실제 품질 검증이 아니다(`docs/rag-evaluation.md`). 검색 상한과 근거 없음 기준은 `docs/rag-retrieval.md`, DB 스키마·실행 계획·중복 저장 책임은 `docs/rag-index-db.md`에 있다.

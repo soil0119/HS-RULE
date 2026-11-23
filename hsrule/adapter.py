@@ -14,7 +14,15 @@ class RegulationAdapter:
 
     def analyze_conflict(self, text, filename, include_private=True, *, language="ko") -> dict:
         result = self._conflicts.analyze(text, filename, include_private=include_private, language=language)
-        return {key: result[key] for key in ("summary", "conflicts", "recommendations", "scope")}
+        payload = {key: result[key] for key in ("summary", "conflicts", "scope")}
+        # 웹 API의 ConflictResult.recommendations는 문자열이다(최대 10,000자).
+        # 근거 조항을 괄호로 함께 적고, 구조화된 원본은 recommendation_details에 둔다.
+        label = "근거" if language == "ko" else "basis"
+        payload["recommendations"] = "\n".join(
+            f"- {item['text']} ({label}: {item['regulation']} {item['article']})"
+            for item in result["recommendations"])[:10_000]
+        payload["recommendation_details"] = result["recommendations"]
+        return payload
 
 
 def create_regulation_adapter(repository, embeddings=None, settings=None, llm=None) -> RegulationAdapter:
