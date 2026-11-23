@@ -2,7 +2,7 @@ import io
 import os
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from uuid import uuid4
 from unittest.mock import patch
@@ -193,3 +193,27 @@ class PostgresDocumentTests(unittest.TestCase):
         self.assertEqual(client.delete(f"/uploaded-rules/{document_id}", headers=auth).status_code, 200)
         self.assertEqual(client.get(path, headers=auth).status_code, 404)
         self.assertFalse(self.store.file_path(document_id).exists())
+
+    def test_delete_that_cannot_connect_does_not_restore_another_requests_backup(self):
+        from hsrule_web.errors import APIError
+
+        document = self.store.save(make_pdf("Prior staged file"), "prior.pdf")
+        path = self.store.file_path(document.id)
+        pending = path.with_name(f".{path.name}.deleting")
+        path.replace(pending)
+
+        @contextmanager
+        def unavailable_transaction():
+            raise APIError(503, "documents_unavailable", "Database unavailable")
+            yield
+
+        with patch.object(self.store, "_transaction", unavailable_transaction):
+            with self.assertRaises(APIError):
+                self.store.delete(document.id)
+        self.assertFalse(path.exists())
+        self.assertTrue(pending.exists())
+
+    def test_long_display_name_preserves_the_pdf_extension(self):
+        document = self.store.save(make_pdf("Long filename"), "n" * 256 + ".PDF")
+        self.assertEqual(len(document.filename), 255)
+        self.assertTrue(document.filename.endswith(".PDF"))

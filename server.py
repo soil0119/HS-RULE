@@ -1,6 +1,7 @@
 import re
 from threading import BoundedSemaphore
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Path, Request, UploadFile
@@ -70,11 +71,7 @@ def create_app(
         request.state.request_id = uuid4().hex
         acquired = False
         try:
-            try:
-                host = request.url.hostname
-            except ValueError:
-                host = None
-            if host not in allowed_hosts:
+            if not valid_host(request.headers.get("host", ""), allowed_hosts):
                 raise APIError(400, "invalid_host", "허용되지 않은 호스트입니다.")
             path = request.url.path
             if (request.method in ("POST", "DELETE") or path in ("/health", "/rules", "/uploaded-rules")
@@ -99,8 +96,8 @@ def create_app(
                 ))
             elif (path.startswith("/documents/") and path.endswith("/file") and "range" in request.headers
                     and response.status_code in (400, 416)):
-                range_headers = {"Content-Range": response.headers["Content-Range"]} \
-                    if "Content-Range" in response.headers else None
+                range_header = response.headers.get("Content-Range")
+                range_headers = {"Content-Range": range_header} if range_header else None
                 response = error_response(request, APIError(
                     response.status_code, "invalid_range", "PDF 바이트 범위가 올바르지 않습니다.", range_headers
                 ))
@@ -246,6 +243,15 @@ def create_app(
         return QueryResponse(**result.model_dump(exclude={"sources"}), sources=sources)
 
     return app
+
+
+def valid_host(authority: str, allowed_hosts: tuple[str, ...]) -> bool:
+    try:
+        parsed = urlsplit(f"//{authority}")
+        return (parsed.netloc == authority and "@" not in authority and not authority.endswith(":")
+                and parsed.port != 0 and parsed.hostname in allowed_hosts)
+    except ValueError:
+        return False
 
 
 def verified_sources(store: DocumentStore, references: list[object]) -> list[QuerySource]:

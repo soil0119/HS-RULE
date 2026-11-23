@@ -101,6 +101,9 @@ assert readiness.status_code == 503 and readiness.json()['code'] == 'not_ready'
         response = client.get("/health/live", headers={"Host": "elsewhere.example"})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "invalid_host")
+        response = client.get("/health/live", headers={"Host": "wrong@testserver"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "invalid_host")
         for origin, expected in (("https://hs.officeworkkt.com", 200),
                                  ("http://localhost:5173", 200),
                                  ("https://elsewhere.example", 400)):

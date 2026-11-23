@@ -51,13 +51,13 @@ class Settings:
         origin = self.public_origin.rstrip("/")
         try:
             parsed = urlsplit(origin)
-            return origin if (parsed.scheme in ("http", "https") and parsed.hostname and "*" not in origin
-                              and not parsed.username and not parsed.password and "@" not in parsed.netloc
-                              and not parsed.path and not parsed.query and not parsed.fragment
-                              and parsed.port != 0 and all(char.isprintable() and not char.isspace()
-                                                          for char in origin)) else DEFAULT_ORIGIN
+            if (parsed.scheme in ("http", "https") and parsed.hostname and "*" not in origin
+                    and "@" not in parsed.netloc and not parsed.path and not parsed.query and not parsed.fragment
+                    and parsed.port != 0 and all(char.isprintable() and not char.isspace() for char in origin)):
+                return origin
         except ValueError:
-            return DEFAULT_ORIGIN
+            pass
+        return DEFAULT_ORIGIN
 
     @property
     def hosts(self) -> tuple[str, ...]:

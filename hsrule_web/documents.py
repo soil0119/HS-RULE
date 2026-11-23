@@ -80,7 +80,13 @@ def check_byte_limit(data: bytes) -> None:
 
 def display_filename(filename: str) -> str:
     name = PureWindowsPath(filename).name
-    return "".join(char for char in name if char.isprintable())[:255]
+    name = "".join(char for char in name if char.isprintable())
+    if len(name) <= 255:
+        return name
+    extension = PureWindowsPath(name).suffix
+    if 0 < len(extension) <= 16:
+        return name[:255 - len(extension)] + extension
+    return name[:255]
 
 
 def _text_blocks(layout):
@@ -250,6 +256,7 @@ class DocumentStore:
     def delete(self, document_id: str) -> bool:
         path = self.file_path(document_id)
         pending = path.with_name(f".{path.name}.deleting")
+        staged = False
         try:
             with self._transaction() as cursor:
                 cursor.execute("SELECT id FROM web_documents WHERE id = %s FOR UPDATE", (document_id,))
@@ -258,11 +265,22 @@ class DocumentStore:
                 # A hidden backup preserves the bytes until the database commits.
                 if path.exists():
                     path.replace(pending)
-                cursor.execute("DELETE FROM web_documents WHERE id = %s", (document_id,))
+                    staged = True
+                try:
+                    cursor.execute("DELETE FROM web_documents WHERE id = %s", (document_id,))
+                except psycopg2.Error:
+                    # Restore under the row lock when DELETE itself fails.
+                    if staged:
+                        with suppress(OSError):
+                            pending.replace(path)
+                            staged = False
+                    raise
         except (APIError, OSError) as error:
-            if pending.exists() and not path.exists():
-                with suppress(OSError):
+            if staged and not path.exists():
+                try:
                     pending.replace(path)
+                except OSError:
+                    LOGGER.error("Could not restore staged PDF for %s", document_id)
             if isinstance(error, APIError):
                 raise
             raise self._storage_error() from None
