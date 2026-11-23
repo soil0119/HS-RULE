@@ -6,3 +6,6 @@
 - Task 1: pending.
 - Task 2: pending.
 - Task 3: pending.
+
+- 사용자 범위 변경: RAG·LangChain은 sumiiniee의 #9/#10/#11로 인계. 기존 3개 기능 커밋과 17개 검증을 Draft PR #2에 보존. 독립 리뷰·머지 미완료.
+- 저희 실행 이슈: #6 UI, #7 일반 API·문서 관리, #8 도메인·검증. 후속 작업은 별도 main 기반 브랜치에서 진행.
