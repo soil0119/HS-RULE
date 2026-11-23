@@ -123,6 +123,31 @@
     const restoredTurns = items => items.filter(item => item && typeof item.question === 'string').slice(-20).flatMap(item => { try { return [{ question: item.question, status: 'answer', response: normalizeAnswer(item.response) }]; } catch { return []; } });
     let turns = current ? restoredTurns(current.turns) : [], busy = false, questionError = '';
     let libraryState = 'idle', libraryError = null, documents = [], chapters = [], selectedChapter = 'all';
+    let placeholderTimer, placeholderExamples = [], placeholderIndex = 0, placeholderLength = 0, placeholderDeleting = false, placeholderFocused = false;
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+    function stopPlaceholder() { clearTimeout(placeholderTimer); }
+    function animatePlaceholder() {
+      if (placeholderFocused || input.value || busy || document.hidden || reducedMotion.matches) { stopPlaceholder(); return; }
+      const example = placeholderExamples[placeholderIndex];
+      placeholderLength += placeholderDeleting ? -1 : 1;
+      input.placeholder = example.slice(0, placeholderLength);
+      let delay = placeholderDeleting ? 28 : 65;
+      if (placeholderLength === example.length) { placeholderDeleting = true; delay = 1400; }
+      else if (placeholderLength === 0) { placeholderDeleting = false; placeholderIndex = (placeholderIndex + 1) % placeholderExamples.length; delay = 350; }
+      placeholderTimer = setTimeout(animatePlaceholder, delay);
+    }
+    function restartPlaceholder() {
+      stopPlaceholder();
+      if (!placeholderExamples.length) return;
+      placeholderIndex = 0; placeholderLength = 0; placeholderDeleting = false;
+      input.placeholder = placeholderExamples[0];
+      if (!placeholderFocused && !input.value && !busy && !document.hidden && !reducedMotion.matches && !$('#chat-view').hidden) animatePlaceholder();
+    }
+    input.addEventListener('focus', () => { placeholderFocused = true; stopPlaceholder(); input.placeholder = placeholderExamples[0] || ''; });
+    input.addEventListener('blur', () => { placeholderFocused = false; restartPlaceholder(); });
+    reducedMotion.addEventListener?.('change', restartPlaceholder);
+    document.addEventListener('visibilitychange', restartPlaceholder);
+
     function persist() {
       const saved = turns.filter(turn => turn.status === 'answer').map(turn => ({ question: turn.question, response: turn.response })); if (!saved.length) return;
       current = { id: current?.id || crypto.randomUUID(), title: saved[0].question.slice(0, 90), turns: saved, updated: Date.now() };
@@ -134,10 +159,10 @@
       history.forEach(item => { const entry = button(text(item.title), 'history-entry', () => { if (busy) { showToast('historyBusy'); return; } current = item; turns = restoredTurns(item.turns); storage.set('hsu_active_v2', item.id); input.value = ''; updateQuestion(); location.hash = ''; showView(); renderChat(); $('#history-dialog').close(); }, `history-${item.id}`); if (Number.isFinite(item.updated)) entry.append(node('time', '', new Date(item.updated).toLocaleDateString(I.language === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric' }))); target.append(entry); });
     }
     function renderExamples() {
-      const student = I.language === 'ko' ? [['학적', '휴학 신청에 관한 규정은 어디에서 확인하나요?'], ['장학', '장학금 관련 규정을 찾고 싶습니다.'], ['졸업', '졸업 요건을 확인할 수 있는 문서를 알려 주세요.'], ['수업', '수강 신청과 관련된 PDF 규정을 찾고 싶습니다.']] : [['Enrollment', 'Where can I find the regulations on taking a leave of absence?'], ['Scholarships', 'Help me find the regulations on scholarships.'], ['Graduation', 'Which documents describe the graduation requirements?'], ['Courses', 'Where can I find PDF regulations on course registration?']];
-      const staff = I.language === 'ko' ? [['복무', '교직원 복무 관련 규정을 찾고 싶습니다.'], ['문서', '문서 관리 절차가 담긴 규정은 어디에 있나요?'], ['출장', '출장 신청 전에 확인할 규정을 알려 주세요.'], ['위원회', '위원회 운영 관련 PDF를 찾고 싶습니다.']] : [['Employment', 'Help me find the regulations on staff duties.'], ['Documents', 'Where can I find the document management procedures?'], ['Travel', 'Which regulations should I review before requesting business travel?'], ['Committees', 'Help me find PDFs on committee operations.']];
+      const student = I.language === 'ko' ? [['학적', '휴학 신청에 관한 규정은 어디에서 확인하나요?'], ['장학', '장학금 관련 규정을 찾고 싶습니다.'], ['졸업', '졸업 요건을 확인할 수 있는 문서를 알려 주세요.'], ['수업', '수강 신청과 관련된 규정을 찾고 싶습니다.']] : [['Enrollment', 'Where can I find the regulations on taking a leave of absence?'], ['Scholarships', 'Help me find the regulations on scholarships.'], ['Graduation', 'Which documents describe the graduation requirements?'], ['Courses', 'Where can I find regulations on course registration?']];
+      const staff = I.language === 'ko' ? [['복무', '교직원 복무 관련 규정을 찾고 싶습니다.'], ['문서', '문서 관리 절차가 담긴 규정은 어디에 있나요?'], ['출장', '출장 신청 전에 확인할 규정을 알려 주세요.'], ['위원회', '위원회 운영 관련 규정을 찾고 싶습니다.']] : [['Employment', 'Help me find the regulations on staff duties.'], ['Documents', 'Where can I find the document management procedures?'], ['Travel', 'Which regulations should I review before requesting business travel?'], ['Committees', 'Help me find regulations on committee operations.']];
       const list = $('#example-list'); list.replaceChildren(); (I.audience === 'staff' ? staff : student).forEach(([category, question], index) => { const control = button('', 'example-row', () => fillQuestion(question), `example-question-${index + 1}`); control.append(node('span', 'example-category', category), node('span', 'example-question', question), icon('arrow-up-right')); list.append(control); });
-      input.placeholder = t(I.audience === 'staff' ? 'staffPlaceholder' : 'questionPlaceholder');
+      placeholderExamples = (I.audience === 'staff' ? staff : student).map(([, question]) => question); restartPlaceholder();
     }
     function updateQuestion() { $('#question-counter').textContent = `${input.value.length.toLocaleString(I.language)} / 2,000`; $('#question-error').hidden = !questionError; $('#question-error').textContent = questionError ? t(questionError) : ''; }
     function fillQuestion(value) { if (busy) return; input.value = value.slice(0, 2000); questionError = ''; updateQuestion(); input.focus({ preventScroll: true }); }
@@ -194,8 +219,8 @@
       catch (error) { libraryError = error; libraryState = 'error'; }
       finally { $('#refresh-library').disabled = false; renderLibrary(); }
     }
-    function showView() { const library = location.hash === '#library'; $('#chat-view').hidden = library; $('#library-view').hidden = !library; $$('[data-nav]').forEach(link => { if (link.dataset.nav === (library ? 'library' : 'chat')) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }); document.title = `${t(library ? 'libraryTitle' : 'askTitle')} · HS-RULE`; if (library && libraryState === 'idle') loadLibrary(); }
-    form.addEventListener('submit', event => { event.preventDefault(); sendQuestion(input.value); }); input.addEventListener('input', () => { questionError = ''; updateQuestion(); });
+    function showView() { const library = location.hash === '#library'; $('#chat-view').hidden = library; $('#library-view').hidden = !library; $$('[data-nav]').forEach(link => { if (link.dataset.nav === (library ? 'library' : 'chat')) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }); document.title = `${t(library ? 'libraryTitle' : 'askTitle')} · HS-RULE`; if (library) stopPlaceholder(); else restartPlaceholder(); if (library && libraryState === 'idle') loadLibrary(); }
+    form.addEventListener('submit', event => { event.preventDefault(); sendQuestion(input.value); }); input.addEventListener('input', () => { questionError = ''; updateQuestion(); restartPlaceholder(); });
     input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && (event.ctrlKey || event.metaKey || !matchMedia('(pointer: coarse)').matches)) { event.preventDefault(); if (!busy) form.requestSubmit(); } });
     $('#new-question').addEventListener('click', newQuestion); $('#open-history').addEventListener('click', () => { renderHistory(); $('#history-dialog').showModal(); });
     document.addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !$$('dialog').some(dialog => dialog.open)) { event.preventDefault(); newQuestion(); } });
