@@ -1,24 +1,21 @@
 # HS-RULE 앱/API 구현 범위
 
-## 확정 사항
+## 규정 자료와 담당자
 
-- 상위 작업 #3. 초기 구성 #4와 진단 #5는 완료 기록이다.
-- 저희: #7 인증·권한·PDF 문서 보관 API, #6 Local Codex 기반 PC·모바일 전체 UI, #8 hs.officeworkkt.com 설정·실행 문서·가벼운 CI.
-- RAG·청킹·임베딩·pgvector 검색·LangChain·AI 생성·평가: sumiiniee의 #9·#10·#11. 기존 초안은 Draft PR #2에 인계하며 새 앱 PR에 포함하지 않는다.
-- 사용자 PDF는 아직 없다. 보관과 페이지 추출은 합성 PDF로 검증한다.
+한성대학교 공식 규정관리시스템에서 수집한 공개 규정 본문을 서비스의 주 자료로 사용한다. 수집에서 규정·개정 식별자, 원문 링크, 첨부 상태를 보존한다. 관리자 PDF는 공개 범위를 선택해 보관할 수 있는 추가 자료다. 기존 JSON은 진단용 스냅샷으로 남긴다.
 
-## 구현 원칙
+| 범위 | 담당자 | 추적 |
+|---|---|---|
+| 백엔드, 공식 공개 규정 크롤러, 일반 PostgreSQL | `neicebee` | #7, #16–#22 |
+| RAG, LangChain, 청킹·임베딩·벡터 DB, 모델과 검색 평가 | `sumiiniee` | #9–#11 및 하위 이슈 |
+| 프론트엔드, PC·모바일과 한국어·영어 전환 | `IVEhades` 예정. 초대 수락 후 GitHub 배정 확인 | #6, #13–#15 |
+| 도메인, 실행 문서, 가벼운 CI | #8에서 추적 | 관련 하위 이슈 |
 
-기존 FastAPI·PostgreSQL과 정적 HTML/CSS/JS를 유지한다. 일반 문서 메타데이터·페이지 보관은 벡터·모델 없이 동작한다. Postgres 대신 별도 SQLite를 추가하지 않는다. 원본은 uploads/{server_id}.pdf, DB에는 안전한 ID·메타데이터·페이지 텍스트를 저장한다. 관리자 업로드는 private가 기본이고 public은 명시적으로 선택한다.
+상위 이슈는 #3이다. 초기 구성 #4와 진단 #5를 완료했고, 남은 구현은 #13–#32에 등록했다. PDF 색인 기반 PR #2는 사용자가 main에 병합했다. [상위 이슈 #3](https://github.com/soil0119/HS-RULE/issues/3) · [PR #2](https://github.com/soil0119/HS-RULE/pull/2)
 
-서버는 RAG 서비스의 명시적 주입 계약만 제공한다. 미연결 질의·충돌 분석은 503으로 안내하며 임의 답변·가짜 임베딩을 만들지 않는다. 모델·DB·관리자 설정 누락이 UI와 liveness를 막지 않는다. 인증과 공개 범위·파일 경계는 실제 API에서 검증한다.
+## 현재 게시 범위
 
-PUBLIC_ORIGIN은 https://hs.officeworkkt.com이며 로컬 개발을 허용한다. 실제 DNS·TLS·호스팅 배포는 별도 접근·대상이 확인되어야 한다. CI는 비밀값·모델 다운로드 없이 일반 앱 문법/단위/API와 가능한 격리 DB 검증을 수행한다.
+- Draft PR #33은 일반 앱/API, 관리자 인증, 선택 PDF 보관, RAG 주입 계약을 담는다. 선택 PDF는 서버가 발급한 ID로 원본과 1기반 페이지를 보관한다. 공개 목록은 공개 PDF만 제공한다. 질의·충돌 분석은 RAG 어댑터 미연결 상태에서 503을 반환한다. [Draft PR #33](https://github.com/soil0119/HS-RULE/pull/33) · [API 계약](api-contract.md)
+- 성공한 Local Codex 디자인은 별도 Draft PR에서 보존한다. 공식 자료 수집, UI 서비스 연동과 PC·모바일 검증, RAG/검색 품질 평가, 운영/CI 구현은 각 담당 이슈에 남긴다.
 
-## PR 순서
-
-1. codex/app-api → main: #7 일반 API·인증·PDF 문서 관리와 RAG 연결 계약.
-2. codex/open-design-ui → codex/app-api: #6 생성 UI·안전한 API 연결·PC/모바일 검증.
-3. codex/app-ops → codex/open-design-ui: #8 도메인·실행 문서·최소 CI·통합 검증.
-
-각 컴포넌트를 자주 커밋하고 PR에 이슈와 검증/제한을 기록한다. 사용자 머지로 남긴다.
+앱은 FastAPI, PostgreSQL 및 정적 HTML/CSS/JS를 사용한다. 일반 문서 보관은 경량 Python 의존성만 사용한다. 기본 공개 출처는 `https://hs.officeworkkt.com`이며 로컬 개발을 허용한다. 실제 DNS·TLS·호스팅과 운영 DB는 #8 작업에서 검증한다.
