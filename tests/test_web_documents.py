@@ -2,14 +2,16 @@ import io
 import os
 import tempfile
 import unittest
-from contextlib import closing, contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 from unittest.mock import patch
 
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extensions import make_dsn
+from psycopg2.extensions import connection, make_dsn
 from reportlab.pdfgen.canvas import Canvas
 
 
@@ -202,12 +204,7 @@ class PostgresDocumentTests(unittest.TestCase):
         pending = path.with_name(f".{path.name}.deleting")
         path.replace(pending)
 
-        @contextmanager
-        def unavailable_transaction():
-            raise APIError(503, "documents_unavailable", "Database unavailable")
-            yield
-
-        with patch.object(self.store, "_transaction", unavailable_transaction):
+        with patch("hsrule_web.documents.psycopg2.connect", side_effect=psycopg2.OperationalError):
             with self.assertRaises(APIError):
                 self.store.delete(document.id)
         self.assertFalse(path.exists())
@@ -217,3 +214,90 @@ class PostgresDocumentTests(unittest.TestCase):
         document = self.store.save(make_pdf("Long filename"), "n" * 256 + ".PDF")
         self.assertEqual(len(document.filename), 255)
         self.assertTrue(document.filename.endswith(".PDF"))
+
+    def test_pdf_survives_a_lost_commit_acknowledgement(self):
+        from hsrule_web.errors import APIError
+
+        connect = psycopg2.connect
+
+        class AcknowledgementLost(connection):
+            def __exit__(self, exc_type, exc, traceback):
+                result = super().__exit__(exc_type, exc, traceback)
+                if exc_type is None:
+                    raise psycopg2.OperationalError("test: COMMIT response lost after server commit")
+                return result
+
+        def connect_for_save(dsn, **options):
+            if save_connect.call_count == 1:
+                return connect(dsn, connection_factory=AcknowledgementLost, **options)
+            raise psycopg2.OperationalError("test: database unreachable during recovery")
+
+        data = make_pdf("Committed original")
+        with (
+            patch("hsrule_web.documents.psycopg2.connect", side_effect=connect_for_save) as save_connect,
+            self.assertLogs("hsrule_web.documents", level="WARNING"),
+            self.assertRaises(APIError),
+        ):
+            self.store.save(data, "committed.pdf", visibility="public")
+        documents = self.store.list()
+        self.assertEqual(len(documents), 1)
+        self.assertTrue(self.store.file_path(documents[0].id).is_file())
+        self.assertEqual(self.store.file_path(documents[0].id).read_bytes(), data)
+
+    def test_proven_commit_rollback_removes_the_uncommitted_original(self):
+        from hsrule_web.errors import APIError
+
+        self.execute("CREATE TABLE allowed_filenames (filename text PRIMARY KEY)")
+        self.execute("ALTER TABLE web_documents ADD CONSTRAINT allowed_filename FOREIGN KEY (filename) "
+                     "REFERENCES allowed_filenames(filename) DEFERRABLE INITIALLY DEFERRED")
+        with self.assertRaises(APIError):
+            self.store.save(make_pdf("Rejected at commit"), "not-allowed.pdf", visibility="public")
+        self.assertEqual(self.store.list(), [])
+        self.assertEqual(list(self.upload_dir.iterdir()), [])
+
+    def test_delete_serializes_a_retry_with_filesystem_recovery_after_commit_failure(self):
+        from hsrule_web.documents import DocumentStore
+        from hsrule_web.errors import APIError
+
+        document = self.store.save(make_pdf("Concurrent deletion"), "original.pdf", visibility="public")
+        path = self.store.file_path(document.id)
+        self.execute("CREATE TABLE prevent_delete (id text REFERENCES web_documents(id) DEFERRABLE INITIALLY DEFERRED)")
+        with closing(psycopg2.connect(self.dsn)) as conn, conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO prevent_delete VALUES (%s)", (document.id,))
+
+        recovering = Event()
+        resume_recovery = Event()
+        retry_started = Event()
+        retry_finished = Event()
+        replace = Path.replace
+        retry_store = DocumentStore(self.dsn, self.upload_dir)
+
+        def delay_restore(source, target):
+            if source.name.endswith(".deleting") and target == path:
+                recovering.set()
+                if not resume_recovery.wait(timeout=8):
+                    raise TimeoutError("test did not release file recovery")
+            return replace(source, target)
+
+        def retry_delete():
+            retry_started.set()
+            try:
+                return retry_store.delete(document.id)
+            finally:
+                retry_finished.set()
+
+        with patch.object(Path, "replace", delay_restore), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.store.delete, document.id)
+            try:
+                self.assertTrue(recovering.wait(timeout=5))
+                self.execute("DELETE FROM prevent_delete")
+                retry = pool.submit(retry_delete)
+                self.assertTrue(retry_started.wait(timeout=5))
+                self.assertFalse(retry_finished.wait(timeout=0.5), "retry overtook original recovery")
+            finally:
+                resume_recovery.set()
+            with self.assertRaises(APIError):
+                first.result(timeout=5)
+            self.assertTrue(retry.result(timeout=5))
+        self.assertIsNone(self.store.get(document.id))
+        self.assertEqual(list(self.upload_dir.iterdir()), [])

@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import re
-from contextlib import closing, contextmanager, suppress
+from contextlib import closing, contextmanager
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO, Literal
 from uuid import uuid4
@@ -134,11 +134,10 @@ class DocumentStore:
         self.upload_dir = Path(upload_dir)
 
     @contextmanager
-    def _transaction(self):
+    def _connection(self):
         try:
             with closing(psycopg2.connect(self.database_url, connect_timeout=3)) as conn:
-                with conn, conn.cursor() as cursor:
-                    yield cursor
+                yield conn
         except psycopg2.errors.UniqueViolation as error:
             if error.diag.constraint_name == "web_documents_content_hash_unique":
                 raise APIError(409, "duplicate_document", "같은 PDF가 이미 보관되어 있습니다.") from None
@@ -147,6 +146,39 @@ class DocumentStore:
             raise APIError(503, "documents_unavailable", "문서 보관소에 연결할 수 없습니다.") from None
         except psycopg2.Error:
             raise self._storage_error() from None
+
+    @contextmanager
+    def _transaction(self):
+        with self._connection() as conn, conn, conn.cursor() as cursor:
+            yield cursor
+
+    @contextmanager
+    def _document_connection(self, document_id: str):
+        # A session lock covers commit and filesystem changes across workers.
+        # A recovery connection takes the same lock before checking the current row.
+        lock_id = int.from_bytes(bytes.fromhex(document_id[:16]), "big", signed=True)
+        with self._connection() as conn:
+            conn.autocommit = True
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_lock(%s)", (lock_id,))
+            conn.autocommit = False
+            yield conn
+
+    def _reconcile_file(self, document_id: str, path: Path, pending: Path | None = None) -> None:
+        try:
+            with self._document_connection(document_id) as conn, conn, conn.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM web_documents WHERE id = %s", (document_id,))
+                exists = cursor.fetchone() is not None
+                if pending is None:
+                    if not exists:
+                        path.unlink(missing_ok=True)
+                elif not exists:
+                    pending.unlink(missing_ok=True)
+                elif pending.exists() and not path.exists():
+                    pending.replace(path)
+        except (APIError, OSError):
+            # Keep any remaining source when the transaction outcome cannot be established.
+            LOGGER.warning("Could not reconcile the PDF file for %s", document_id)
 
     @staticmethod
     def _storage_error() -> APIError:
@@ -226,7 +258,7 @@ class DocumentStore:
         path = self.file_path(metadata.id)
         created = False
         try:
-            with self._transaction() as cursor:
+            with self._document_connection(metadata.id) as conn, conn, conn.cursor() as cursor:
                 cursor.execute(
                     f"INSERT INTO web_documents ({METADATA_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (metadata.id, metadata.title, metadata.filename, metadata.visibility, metadata.content_hash,
@@ -244,10 +276,7 @@ class DocumentStore:
                     os.fsync(output.fileno())
         except (APIError, OSError) as error:
             if created:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    LOGGER.error("Could not clean up a failed PDF insert for %s", metadata.id)
+                self._reconcile_file(metadata.id, path)
             if isinstance(error, APIError):
                 raise
             raise self._storage_error() from None
@@ -258,36 +287,27 @@ class DocumentStore:
         pending = path.with_name(f".{path.name}.deleting")
         staged = False
         try:
-            with self._transaction() as cursor:
-                cursor.execute("SELECT id FROM web_documents WHERE id = %s FOR UPDATE", (document_id,))
-                if cursor.fetchone() is None:
-                    return False
-                # A hidden backup preserves the bytes until the database commits.
-                if path.exists():
-                    path.replace(pending)
-                    staged = True
-                try:
+            with self._document_connection(document_id) as conn:
+                with conn, conn.cursor() as cursor:
+                    cursor.execute("SELECT id FROM web_documents WHERE id = %s FOR UPDATE", (document_id,))
+                    if cursor.fetchone() is None:
+                        return False
+                    # A hidden backup preserves the bytes until the database commits.
+                    staged = pending.exists()
+                    if path.exists():
+                        path.replace(pending)
+                        staged = True
                     cursor.execute("DELETE FROM web_documents WHERE id = %s", (document_id,))
-                except psycopg2.Error:
-                    # Restore under the row lock when DELETE itself fails.
-                    if staged:
-                        with suppress(OSError):
-                            pending.replace(path)
-                            staged = False
-                    raise
-        except (APIError, OSError) as error:
-            if staged and not path.exists():
                 try:
-                    pending.replace(path)
+                    pending.unlink(missing_ok=True)
                 except OSError:
-                    LOGGER.error("Could not restore staged PDF for %s", document_id)
+                    LOGGER.warning("PDF deletion committed, but its recovery file still exists for %s", document_id)
+        except (APIError, OSError) as error:
+            if staged:
+                self._reconcile_file(document_id, path, pending)
             if isinstance(error, APIError):
                 raise
             raise self._storage_error() from None
-        try:
-            pending.unlink(missing_ok=True)
-        except OSError:
-            LOGGER.error("PDF deletion committed, but its recovery file still exists for %s", document_id)
         return True
 
 
