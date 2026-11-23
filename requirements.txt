@@ -1,0 +1,19 @@
+requests==2.34.2
+beautifulsoup4==4.15.0
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+psycopg2-binary==2.9.13
+python-dotenv==1.2.4
+sentence-transformers==6.3.0
+groq==1.7.0
+python-docx==1.2.0
+reportlab==5.1.0
+pdfminer.six==20260107
+python-multipart==0.0.34
+PyJWT==2.15.1
+pdfplumber==0.11.11
+lxml==6.1.3
+pyhwp==0.1b15
+# pyhwp imports six but omits it from its dependency metadata.
+six==1.17.0
