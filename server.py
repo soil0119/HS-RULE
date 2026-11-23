@@ -1,699 +1,316 @@
-import os
-import jwt
-import shutil
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-load_dotenv()
+import re
+from threading import BoundedSemaphore
+from typing import Annotated
+from urllib.parse import urlsplit
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi import Depends, FastAPI, File, Form, Path, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-import psycopg2
-from sentence_transformers import SentenceTransformer
-from groq import Groq
-from routers.teacher import router as teacher_router, set_ai_client
-import re as _re
-import json as _json
-from pathlib import Path as _Path
-from collections import defaultdict as _defaultdict
+from starlette.exceptions import HTTPException
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-import secrets as _secrets
-
-# ── 환경 변수 ──────────────────────────────────────────────────────
-GROQ_KEY   = os.getenv("GROQ_API_KEY")
-DB_URL     = os.getenv("DATABASE_URL")
-
-# SECRET_KEY: .env에 32자 이상으로 설정 권장. 미설정 시 자동 생성 (재시작마다 바뀜)
-_raw_key   = os.getenv("SECRET_KEY", "")
-SECRET_KEY = _raw_key if len(_raw_key) >= 32 else _secrets.token_hex(32)
-if len(_raw_key) < 32:
-    print("⚠️  SECRET_KEY가 짧거나 없습니다. .env에 32자 이상 랜덤 문자열을 추가하세요.")
-
-# 관리자 계정 — .env에 ADMIN_ID / ADMIN_PW 추가하면 변경 가능
-# 기본값: admin / 1234
-ADMIN_ID = os.getenv("ADMIN_ID", "admin")
-ADMIN_PW = os.getenv("ADMIN_PW", "1234")
-
-if not GROQ_KEY:
-    raise RuntimeError("❌ GROQ_API_KEY가 .env에 설정되지 않았습니다.")
-if not DB_URL:
-    raise RuntimeError("❌ DATABASE_URL이 .env에 설정되지 않았습니다.")
-
-EMB_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-GEN_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-TOP_K     = 10
-
-print("임베딩 모델 로딩 중...")
-emb_model = SentenceTransformer(EMB_MODEL)
-print("임베딩 모델 로딩 완료!")
-groq_client = Groq(api_key=GROQ_KEY)
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+from hsrule_web.auth import LoginLimiter, LoginRequest, LoginResponse, issue_token, optional_admin, require_admin
+from hsrule_web.contracts import (
+    MAX_JSON_BODY, MAX_MULTIPART_BODY, AdminRulesResponse, DeleteResponse, HealthResponse, QueryRequest,
+    QueryResponse, QuerySource, RagAnswer, RagBackend, RuleChapter, RuleItem, RulesResponse, SourceReference,
+    UploadResponse, call_rag, invalid_rag_response, require_rag, source_url,
 )
+from hsrule_web.documents import DOCUMENT_ID_PATTERN, DocumentMetadata, DocumentStore, Visibility, read_upload
+from hsrule_web.errors import APIError, error_response
+from hsrule_web.file_response import SourcePDFResponse
+from hsrule_web.settings import BASE_DIR, Settings
+from routers.teacher import router as teacher_router
 
-security = HTTPBearer()
-
-# ── teacher 라우터 연결 ─────────────────────────────────────────────
-app.include_router(teacher_router)
-set_ai_client(groq_client)
-
-DEPT_PHONE = {
-    "학사운영팀": "02-760-4114", "총무인사팀": "02-760-4114",
-    "교수지원팀": "02-760-4114", "학생복지팀": "02-760-4114",
-    "대학원 교학팀": "02-760-4114", "입학관리팀": "02-760-4114",
-    "연구지원팀": "02-760-4114", "재무회계팀": "02-760-4114",
-    "전략평가관리팀": "02-760-4114",
+NO_CACHE = {"Cache-Control": "no-store"}
+DEV_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?")
+EXPOSE_HEADERS = ["X-Request-ID", "Content-Disposition", "Content-Range", "Retry-After"]
+LOGIN_BODY = 16 * 1024
+BODY_LIMITS = {
+    "/login": LOGIN_BODY,
+    "/query": MAX_JSON_BODY,
+    "/export/pdf": MAX_JSON_BODY,
+    "/export/docx": MAX_JSON_BODY,
+    "/conflict/": MAX_MULTIPART_BODY,
+    "/upload-regulation": MAX_MULTIPART_BODY,
 }
-
-SYSTEM = """
-당신은 한성대학교 규정 안내 AI입니다.
-경험 많은 행정 담당자처럼 학생과 교직원이 규정을 쉽게 이해할 수 있도록 친절하고 실용적으로 안내합니다.
-
-━━━ 출력 형식 (반드시 이 순서와 구조를 지키세요) ━━━
-
-◆ 첫 번째 줄: 답변을 한 줄로 요약한 제목
-  - "제목:", "1.", 기타 레이블 없이 제목 텍스트만 작성합니다.
-  - 예시: 교원 신규 임용 절차 안내
-  - 절대 금지: "1. 제목", "제목:", "## 제목" 등 레이블 포함 금지
-
-◆ 빈 줄 하나
-
-◆ 본문: 자연스러운 한국어 문단
-  - "본문:", "2." 같은 레이블을 절대 붙이지 마세요. 바로 내용을 씁니다.
-  - 핵심 내용을 2~3문장으로 먼저 요약합니다.
-  - 이어서 조건, 절차, 예외, 실무 해석을 구체적으로 설명합니다.
-  - 규정 원문을 그대로 옮기지 말고, 실제로 어떻게 적용되는지 풀어 씁니다.
-  - 어려운 법령·행정 용어는 일반인이 이해할 수 있는 말로 바꿉니다.
-  - 필요하면 항목(-)으로 나눠 가독성을 높입니다.
-
-◆ 빈 줄 하나
-
-◆ 출처 (레이블 없이 괄호 형식만 사용)
-  (출처: 규정명 제N조)
-  여러 조항이면 줄 바꿔서 모두 씁니다.
-
-◆ 빈 줄 하나
-
-◆ 담당부서 (규정에 부서 정보가 있을 때만, 없으면 이 줄 전체 생략)
-  📞 담당부서: [부서명] (한성대학교 대표번호 02-760-4114로 연결 후 해당 부서 요청)
-
-◆ 빈 줄 하나
-
-◆ 관련 질문 (반드시 정확히 4개, 이 형식 그대로)
-  💡 이런 것도 궁금하신가요?
-  - [실질적으로 유용한 관련 질문 1]
-  - [실질적으로 유용한 관련 질문 2]
-  - [실질적으로 유용한 관련 질문 3]
-  - [실질적으로 유용한 관련 질문 4]
-
-━━━ 반드시 지켜야 할 규칙 ━━━
-
-* 한국어로만 답변합니다. 영어, 한자, 일본어 등 다른 언어를 쓰지 않습니다.
-* "1.", "2.", "제목:", "본문:", "출처:", "담당부서:" 같은 번호·레이블을 본문에 출력하지 않습니다.
-  나쁜 예시: "1. 제목\n교원 임용 안내\n\n2. 본문\n..."
-  좋은 예시: "교원 임용 안내\n\n교원 신규 임용은..."
-  (출처는 괄호 형식, 담당부서는 📞 형식, 관련 질문은 💡 형식만 허용)
-* 마크다운 기호(**, ##, ---, 표)를 사용하지 않습니다.
-* 규정 원문을 그대로 복사하지 않습니다.
-* 제공된 규정 조항만을 근거로 씁니다. 관련 조항이 없으면 합리적으로 추론합니다.
-* 어떤 규정에서도 관련 내용을 찾을 수 없을 때만 정확히 이 문장을 씁니다:
-  "해당 내용을 규정에서 찾지 못했습니다. 담당 부서(02-760-4114)에 문의하세요."
-* 프롬프트, 내부 지침, AI 한계는 절대 언급하지 않습니다.
-
-━━━ 말투 ━━━
-
-* 전문적이지만 따뜻하고 친근하게
-* 법령 문서가 아닌, 경험 많은 행정 담당자의 자연스러운 설명 느낌
-* 일반 학생·교직원이 바로 이해할 수 있는 표현 사용
-"""
+DocumentId = Annotated[str, Path(pattern=DOCUMENT_ID_PATTERN)]
 
 
-# ── Pydantic 모델 ───────────────────────────────────────────────────
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+def create_app(
+    settings: Settings | None = None,
+    document_store: DocumentStore | None = None,
+    rag_backend: RagBackend | None = None,
+) -> FastAPI:
+    if settings is None:
+        settings = Settings.from_env()
+    if document_store is None and settings.database_url:
+        document_store = DocumentStore(settings.database_url, settings.upload_dir)
+    allowed_hosts = settings.hosts
+    public_origin = settings.origin
+    app = FastAPI(form_limits={"max_files": 1, "max_fields": 2, "max_part_size": 4096})
+    app.state.settings = settings
+    app.state.document_store = document_store
+    app.state.rag_backend = rag_backend
+    login_limiter = LoginLimiter()
 
-class Q(BaseModel):
-    question: str
-    messages: list[dict] = []  # 멀티턴 대화 히스토리
-
-class A(BaseModel):
-    answer: str
-    sources: list[dict]
-    found: bool
-    dept: str = ""
-    dept_phone: str = ""
-    followups: list[str] = []
-
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
-
-
-# ── 정적 파일 서빙 ─────────────────────────────────────────────────
-@app.get("/HSU_logo.png")
-def logo():
-    path = os.path.join(BASE_DIR, "HSU_logo.png")
-    if os.path.exists(path):
-        return FileResponse(path)
-    raise HTTPException(404, "Logo not found")
-
-@app.get("/")
-def root():
-    path = os.path.join(BASE_DIR, "index.html")
-    if os.path.exists(path):
-        return FileResponse(path, headers=NO_CACHE)
-    raise HTTPException(404, "index.html not found")
-
-@app.get("/login-page")
-def login_page():
-    path = os.path.join(BASE_DIR, "login.html")
-    if os.path.exists(path):
-        return FileResponse(path, headers=NO_CACHE)
-    raise HTTPException(404, "login.html not found")
-
-@app.get("/upload")
-def upload_page():
-    path = os.path.join(BASE_DIR, "upload.html")
-    if os.path.exists(path):
-        return FileResponse(path, headers=NO_CACHE)
-    raise HTTPException(404, "upload.html not found")
-
-@app.get("/health")
-def health():
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM rule_chunks;")
-        count = cur.fetchone()[0]
-        conn.close()
-        return {"ok": True, "chunks": count}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-# ── 로그인 (DB 없이 env 변수 기반) ────────────────────────────────
-@app.post("/login")
-def login(data: LoginRequest):
-    if data.username != ADMIN_ID or data.password != ADMIN_PW:
-        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
-
-    token = jwt.encode(
-        {
-            "sub": data.username,
-            "exp": datetime.utcnow() + timedelta(hours=12)
-        },
-        SECRET_KEY,
-        algorithm="HS256"
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[public_origin],
+        allow_origin_regex=DEV_ORIGIN.pattern,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "Range"],
+        expose_headers=EXPOSE_HEADERS,
     )
-    return {"success": True, "token": token}
+    app.include_router(teacher_router)
 
-
-# ── JWT 검증 의존성 ────────────────────────────────────────────────
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="토큰이 만료되었습니다. 다시 로그인해 주세요.")
-    except Exception:
-        raise HTTPException(status_code=401, detail="인증에 실패했습니다.")
-
-
-# ── 텍스트 추출 헬퍼 ───────────────────────────────────────────────
-def _extract_text(file: UploadFile) -> str:
-    import io
-    file.file.seek(0)          # 포인터 리셋 (SpooledTemporaryFile 안전하게)
-    data  = file.file.read()
-    fname = (file.filename or "").lower()
-    ctype = (file.content_type or "").lower()
-
-    if fname.endswith(".pdf") or "pdf" in ctype:
+    @app.middleware("http")
+    async def request_boundary(request: Request, call_next):
+        request.state.request_id = uuid4().hex
         try:
-            from pdfminer.high_level import extract_text
-            text = extract_text(io.BytesIO(data))
-            if text and text.strip():
-                return text.strip()
+            path = request.url.path
+            # Route body limits also count streamed requests without Content-Length.
+            limit = BODY_LIMITS.get(path) if request.method == "POST" else None
+            length = request.headers.get("content-length")
+            if limit and length is not None:
+                if not length.isascii() or not length.isdecimal() or len(length) > 12:
+                    raise APIError(400, "invalid_input", "본문 길이 형식이 올바르지 않습니다.")
+                if int(length) > limit:
+                    raise body_too_large()
+            response = await call_next(request)
+            if (request.method == "OPTIONS" and "access-control-request-method" in request.headers
+                    and response.status_code == 400):
+                response = error_response(request, APIError(
+                    400, "cors_not_allowed", "허용되지 않은 교차 출처 요청입니다."
+                ))
+            elif (path.startswith("/documents/") and path.endswith("/file") and "range" in request.headers
+                    and response.status_code in (400, 416)):
+                range_header = response.headers.get("Content-Range")
+                range_headers = {"Content-Range": range_header} if range_header else None
+                response = error_response(request, APIError(
+                    response.status_code, "invalid_range", "PDF 바이트 범위가 올바르지 않습니다.", range_headers
+                ))
+        except APIError as error:
+            response = error_response(request, error)
         except Exception:
-            pass
-        raise HTTPException(400, "PDF 텍스트 추출 실패 (스캔본 제외, 텍스트 기반 PDF만 지원)")
+            response = error_response(request, APIError(500, "internal_error", "요청을 처리하지 못했습니다."))
+        set_response_headers(request, response, public_origin)
+        return response
 
-    if fname.endswith(".docx") or "wordprocessingml" in ctype:
-        from docx import Document as DocxDoc
-        doc = DocxDoc(io.BytesIO(data))
-        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    app.add_middleware(RequestAdmission, allowed_hosts=allowed_hosts, public_origin=public_origin)
 
-    if fname.endswith(".json"):
+    @app.exception_handler(APIError)
+    async def handle_api_error(request: Request, error: APIError):
+        return error_response(request, error)
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation(request: Request, error: RequestValidationError):
+        return error_response(request, APIError(422, "invalid_input", "요청 형식 또는 값이 올바르지 않습니다."))
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_error(request: Request, error: HTTPException):
+        if error.status_code == 413:
+            return error_response(request, body_too_large())
+        detail = "요청한 항목을 찾을 수 없습니다." if error.status_code == 404 else "요청을 처리하지 못했습니다."
+        return error_response(request, APIError(error.status_code, "http_error", detail, error.headers))
+
+    def get_store() -> DocumentStore:
+        if document_store is None:
+            raise APIError(503, "documents_not_configured", "문서 보관소가 설정되지 않았습니다.")
+        return document_store
+
+    def find_document(document_id: str, admin: bool) -> DocumentMetadata:
+        document = get_store().get(document_id, include_private=admin)
+        if document is None or (not admin and document.metadata.visibility != "public"):
+            raise document_not_found()
+        return document.metadata
+
+    def static_file(filename: str):
+        path = BASE_DIR / filename
+        if not path.is_file():
+            raise APIError(404, "file_not_found", "요청한 파일을 찾을 수 없습니다.")
+        return FileResponse(path, headers=NO_CACHE)
+
+    @app.get("/")
+    def root():
+        return static_file("index.html")
+
+    @app.get("/login-page")
+    def login_page():
+        return static_file("login.html")
+
+    @app.get("/upload")
+    def upload_page():
+        return static_file("upload.html")
+
+    @app.get("/HSU_logo.png")
+    def logo():
+        return static_file("HSU_logo.png")
+
+    @app.get("/health/live", response_model=HealthResponse)
+    def live():
+        return HealthResponse()
+
+    @app.get("/health", response_model=HealthResponse)
+    def readiness():
+        if (not settings.admin_enabled or rag_backend is None or document_store is None
+                or not document_store.health()):
+            raise APIError(503, "not_ready", "서비스에 필요한 설정 또는 연결이 준비되지 않았습니다.")
+        return HealthResponse()
+
+    @app.post("/login", response_model=LoginResponse, max_body_size=LOGIN_BODY)
+    def login(data: LoginRequest, request: Request):
+        if not settings.admin_enabled:
+            raise APIError(503, "admin_not_configured", "관리자 로그인이 설정되지 않았습니다.")
+        login_limiter.reserve(request.client.host if request.client else "")
+        return LoginResponse(token=issue_token(settings, data))
+
+    @app.get("/rules", response_model=RulesResponse)
+    def rules():
+        public_documents = get_store().list()
+        entries = [
+            RuleItem(**metadata.model_dump(), name=metadata.title, url=source_url(metadata.id))
+            for metadata in public_documents if metadata.visibility == "public"
+        ]
+        chapters = [RuleChapter(chapter="업로드 규정", rules=entries)] if entries else []
+        return RulesResponse(chapters=chapters, total=len(entries))
+
+    @app.get("/uploaded-rules", response_model=AdminRulesResponse, dependencies=[Depends(require_admin)])
+    def uploaded_rules():
+        return AdminRulesResponse(rules=get_store().list(include_private=True))
+
+    @app.post("/upload-regulation", response_model=UploadResponse, status_code=201,
+              dependencies=[Depends(require_admin)], max_body_size=MAX_MULTIPART_BODY)
+    def upload_document(
+        file: Annotated[UploadFile, File()],
+        title: Annotated[str | None, Form(max_length=200)] = None,
+        visibility: Annotated[Visibility, Form()] = "private",
+    ):
+        metadata = get_store().save(read_upload(file.file), file.filename or "", title=title, visibility=visibility)
+        return UploadResponse(document=metadata)
+
+    @app.delete("/uploaded-rules/{document_id}", response_model=DeleteResponse,
+                dependencies=[Depends(require_admin)])
+    def delete_document(document_id: DocumentId):
+        if not get_store().delete(document_id):
+            raise document_not_found()
+        return DeleteResponse(document_id=document_id)
+
+    @app.get("/documents/{document_id}", response_model=DocumentMetadata)
+    def document_metadata(document_id: DocumentId, admin: bool = Depends(optional_admin)):
+        return find_document(document_id, admin)
+
+    @app.get("/documents/{document_id}/file", response_class=SourcePDFResponse)
+    def document_file(document_id: DocumentId, admin: bool = Depends(optional_admin)):
+        metadata = find_document(document_id, admin)
+        path = get_store().file_path(document_id)
+        return SourcePDFResponse(path, media_type="application/pdf", filename=metadata.filename,
+                                 content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.post("/query", response_model=QueryResponse, response_model_exclude_none=True, max_body_size=MAX_JSON_BODY)
+    def query(data: QueryRequest):
+        backend = require_rag(rag_backend)
+        store = get_store()
+        result = call_rag(backend.answer, RagAnswer, data.question.strip(),
+                          [message.model_dump() for message in data.messages],
+                          include_private=False, language=data.language)
+        sources = verified_sources(store, result.sources)
+        if result.found and not sources:
+            raise invalid_rag_response()
+        return QueryResponse(**result.model_dump(exclude={"sources"}), sources=sources)
+
+    return app
+
+
+def set_response_headers(request: Request, response, public_origin: str) -> None:
+    # Middleware-generated errors still need the allowed-origin headers for browsers.
+    origin = request.headers.get("origin")
+    if (response.status_code >= 400 and "access-control-request-method" not in request.headers and origin
+            and (origin == public_origin or DEV_ORIGIN.fullmatch(origin))):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(EXPOSE_HEADERS)
+        if "Vary" not in response.headers:
+            response.headers.add_vary_header("Origin")
+    response.headers["X-Request-ID"] = request.state.request_id
+    response.headers["Cache-Control"] = "no-store"
+
+
+class RequestAdmission:
+    def __init__(self, app: ASGIApp, allowed_hosts: tuple[str, ...], public_origin: str):
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+        self.public_origin = public_origin
+        # ponytail: this ceiling covers all admitted ASGI work per worker.
+        self.slots = BoundedSemaphore(8)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         try:
-            items = _json.loads(data.decode("utf-8"))
-            if isinstance(items, list):
-                parts = []
-                for item in items:
-                    if isinstance(item, dict):
-                        parts.append(" ".join(str(v) for v in item.values() if v))
-                return "\n".join(parts)
-            return _json.dumps(items, ensure_ascii=False)
-        except Exception as e:
-            raise HTTPException(400, f"JSON 파싱 실패: {e}")
-
-    # TXT 및 기타
-    for enc in ["utf-8", "cp949", "euc-kr"]:
+            if not valid_host(request.headers.get("host", ""), self.allowed_hosts):
+                raise APIError(400, "invalid_host", "허용되지 않은 호스트입니다.")
+            path = scope["path"]
+            limited = (request.method in ("POST", "DELETE") or path in ("/health", "/rules", "/uploaded-rules")
+                       or path.startswith("/documents/"))
+            if limited and not self.slots.acquire(blocking=False):
+                raise APIError(429, "request_limit", "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
+                               {"Retry-After": "1"})
+        except APIError as error:
+            request.state.request_id = uuid4().hex
+            response = error_response(request, error)
+            set_response_headers(request, response, self.public_origin)
+            await response(scope, receive, send)
+            return
         try:
-            return data.decode(enc).strip()
-        except Exception:
-            continue
-    return data.decode("utf-8", errors="ignore").strip()
+            await self.app(scope, receive, send)
+        finally:
+            if limited:
+                self.slots.release()
 
 
-def _chunk_text(text: str, max_len: int = 400) -> list[str]:
-    """단락 기준으로 청크 분할, max_len 초과 시 문장 단위 재분할"""
-    paragraphs = [p.strip() for p in _re.split(r'\n{2,}', text) if p.strip()]
-    chunks = []
-    buf = ""
-    for para in paragraphs:
-        if len(buf) + len(para) < max_len:
-            buf = (buf + "\n" + para).strip() if buf else para
-        else:
-            if buf:
-                chunks.append(buf)
-            # 단락 자체가 너무 길면 문장 단위로 자름
-            if len(para) > max_len:
-                sentences = _re.split(r'(?<=[.!?])\s+', para)
-                buf = ""
-                for s in sentences:
-                    if len(buf) + len(s) < max_len:
-                        buf = (buf + " " + s).strip() if buf else s
-                    else:
-                        if buf:
-                            chunks.append(buf)
-                        buf = s
-            else:
-                buf = para
-    if buf:
-        chunks.append(buf)
-    return [c for c in chunks if len(c) >= 20]
-
-
-def _extract_article_title(chunk: str, idx: int) -> str:
-    """청크에서 조항 제목 추출 (제N조 패턴 우선)"""
-    m = _re.search(r'(제\s*\d+\s*조(?:의\s*\d+)?\s*(?:\([^)]{1,30}\))?)', chunk)
-    if m:
-        return m.group(1).strip()[:60]
-    first = chunk.split('\n')[0].strip()
-    if 3 < len(first) <= 50:
-        return first
-    return f"청크 {idx + 1}"
-
-
-# ── 규정 파일 업로드 & DB 등록 ─────────────────────────────────────
-@app.post("/upload-regulation")
-async def upload_regulation(
-    file: UploadFile = File(...),
-    payload: dict = Depends(verify_token)
-):
-    filename = file.filename or "unknown"
-    upload_tag = f"upload://{filename}"
-
-    # 0) 중복 업로드 체크
+def valid_host(authority: str, allowed_hosts: tuple[str, ...]) -> bool:
     try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM rule_chunks WHERE url = %s", (upload_tag,))
-        if cur.fetchone()[0] > 0:
-            conn.close()
-            raise HTTPException(409, f'"{filename}"은(는) 이미 등록된 규정입니다. 삭제 후 다시 업로드하세요.')
-        conn.close()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"DB 확인 실패: {e}")
-
-    # 1) 텍스트 추출
-    try:
-        text = _extract_text(file)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, f"파일 읽기 실패: {e}")
-
-    if not text or len(text.strip()) < 10:
-        raise HTTPException(400, "파일에서 텍스트를 추출할 수 없습니다.")
-
-    # 2) 청크 분할
-    chunks = _chunk_text(text)
-    if not chunks:
-        raise HTTPException(400, "청크 분할 실패: 내용이 너무 짧습니다.")
-
-    # 3) 임베딩 생성
-    try:
-        embeddings = emb_model.encode(chunks, normalize_embeddings=True).tolist()
-    except Exception as e:
-        raise HTTPException(500, f"임베딩 생성 실패: {e}")
-
-    # 3-1) 규정 편 분류 (Groq로 1~8편 판단)
-    CHAP_MAP_UP = {
-        "1": "학교법인", "2": "학칙", "3": "학사행정",
-        "4": "부속기관", "5": "부설기관", "6": "위원회",
-        "7": "산학협력단", "8": "학생군사교육단",
-    }
-    try:
-        clf = groq_client.chat.completions.create(
-            model=GEN_MODEL,
-            messages=[{"role": "user", "content": f"""한성대학교 규정 체계에서 다음 문서가 속하는 편 번호(1~8)만 답하세요.
-1편:학교법인  2편:학칙  3편:학사행정  4편:부속기관
-5편:부설기관  6편:위원회  7편:산학협력단  8편:학생군사교육단
-규정명: {filename}
-내용: {text[:300]}
-숫자 하나만 답하세요:"""}],
-            max_tokens=3,
-        )
-        raw_clf = clf.choices[0].message.content.strip()
-        m_clf   = _re.search(r'[1-8]', raw_clf)
-        chap_num = m_clf.group(0) if m_clf else "3"
-    except Exception:
-        chap_num = "3"  # 분류 실패 시 학사행정(3편)으로
-
-    dept_tag = f"업로드:{chap_num}"  # 예: "업로드:3"
-
-    # 4) DB 삽입 — url 컬럼에 upload:// 태그로 식별
-    upload_tag = f"upload://{filename}"
-    inserted = 0
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-
-        # id 컬럼이 TEXT 타입 — 타임스탬프 기반 고유 ID 생성
-        import time as _time
-        base_id = int(_time.time() * 1000)  # 밀리초 타임스탬프
-
-        for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-            cur.execute("""
-                INSERT INTO rule_chunks
-                    (id, rule_title, article, department, url, content, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-            """, (
-                str(base_id + i),
-                filename,
-                _extract_article_title(chunk, i),   # 조항 제목 파싱
-                dept_tag,          # "업로드:N" — 편 분류 정보 포함
-                upload_tag,
-                chunk,
-                str(emb)
-            ))
-            inserted += 1
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(500, f"DB 저장 실패: {e}")
-
-    # 5) 원본 파일 로컬 백업 (텍스트는 이미 읽었으므로 data 변수 재사용)
-    os.makedirs(os.path.join(BASE_DIR, "uploads"), exist_ok=True)
-    save_path = os.path.join(BASE_DIR, "uploads", filename)
-    try:
-        file.file.seek(0)
-        with open(save_path, "wb") as f:
-            f.write(file.file.read())
-    except Exception:
-        pass  # 백업 실패는 무시 (DB 저장이 주목적)
-
-    return {"success": True, "filename": filename, "chunks": inserted}
+        parsed = urlsplit(f"//{authority}")
+        return (parsed.netloc == authority and "@" not in authority and not authority.endswith(":")
+                and parsed.port != 0 and parsed.hostname in allowed_hosts)
+    except ValueError:
+        return False
 
 
-# ── 업로드된 규정 목록 조회 ────────────────────────────────────────
-@app.get("/uploaded-rules")
-def list_uploaded_rules(payload: dict = Depends(verify_token)):
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT url, COUNT(*) as cnt, MIN(id) as first_id
-            FROM rule_chunks
-            WHERE url LIKE 'upload://%'
-            GROUP BY url
-            ORDER BY first_id DESC
-        """)
-        rows = cur.fetchall()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(500, f"DB 오류: {e}")
-
-    result = []
-    for row in rows:
-        tag, cnt, _ = row
-        fname = tag.replace("upload://", "")
-        result.append({"filename": fname, "chunks": cnt, "tag": tag})
-    return {"rules": result}
+def verified_sources(store: DocumentStore, references: list[SourceReference]) -> list[QuerySource]:
+    sources = []
+    metadata_cache: dict[str, DocumentMetadata] = {}
+    for reference in references:
+        document_id = reference.document_id
+        if document_id not in metadata_cache:
+            document = store.get(document_id)
+            if (document is None or document.metadata.visibility != "public"
+                    or not store.file_path(document_id).is_file()):
+                raise invalid_rag_response()
+            metadata_cache[document_id] = document.metadata
+        metadata = metadata_cache[document_id]
+        if reference.page_end > metadata.page_count:
+            raise invalid_rag_response()
+        sources.append(QuerySource(**reference.model_dump(), title=metadata.title,
+                                   url=source_url(document_id, reference.page_start)))
+    return sources
 
 
-# ── 업로드된 규정 삭제 ─────────────────────────────────────────────
-@app.delete("/uploaded-rules/{filename:path}")
-def delete_uploaded_rule(filename: str, payload: dict = Depends(verify_token)):
-    tag = f"upload://{filename}"
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("DELETE FROM rule_chunks WHERE url = %s", (tag,))
-        deleted = cur.rowcount
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(500, f"DB 삭제 실패: {e}")
-
-    if deleted == 0:
-        raise HTTPException(404, "해당 규정을 찾을 수 없습니다.")
-
-    # 로컬 백업 파일도 삭제
-    local = os.path.join(BASE_DIR, "uploads", filename)
-    if os.path.exists(local):
-        os.remove(local)
-
-    return {"success": True, "filename": filename, "deleted_chunks": deleted}
+def body_too_large():
+    return APIError(413, "request_too_large", "요청 본문 크기가 허용 한도를 초과했습니다.")
 
 
-# ── 규정 질의 ──────────────────────────────────────────────────────
-@app.post("/query", response_model=A)
-def query(req: Q):
-    q = req.question.strip()
-    if not q:
-        raise HTTPException(400, "Empty question")
-
-    try:
-        expand_resp = groq_client.chat.completions.create(
-            model=GEN_MODEL,
-            messages=[{"role": "user", "content": f"""다음 질문에서 한국 대학 규정 검색에 쓸 핵심 키워드를 추출하세요.
-동의어, 약어, 관련 법령 용어도 포함하세요. 쉼표로 구분해서 단어만 나열하세요. (예: 전과, 학과변경, 전공이동)
-
-질문: {q}
-키워드:"""}],
-            max_tokens=80,
-        )
-        extra_keywords = [k.strip() for k in expand_resp.choices[0].message.content.split(',') if k.strip()]
-    except:
-        extra_keywords = []
-
-    search_text = q + ' ' + ' '.join(extra_keywords)
-
-    try:
-        qemb = emb_model.encode(search_text, normalize_embeddings=True).tolist()
-    except Exception as e:
-        raise HTTPException(500, f"Embedding error: {e}")
-
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT id, rule_title, article, department, url, content,
-                   1 - (embedding <=> %s::vector) AS score
-            FROM rule_chunks
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s;
-        """, (qemb, qemb, TOP_K))
-        rows = list(cur.fetchall())
-
-        raw_keywords = [w for w in (q + ' ' + ' '.join(extra_keywords)).replace("?", "").split() if len(w) >= 3]
-        keywords = list(raw_keywords)
-        for w in raw_keywords:
-            if len(w) >= 4:
-                for i in range(0, len(w)-2, 2):
-                    sub = w[i:i+3]
-                    if sub not in keywords:
-                        keywords.append(sub)
-
-        if keywords:
-            existing_ids = {r[0] for r in rows}
-            for kw in keywords:
-                cur.execute("SELECT id, rule_title, article, department, url, content, 0.85 AS score FROM rule_chunks WHERE article LIKE %s LIMIT %s", (f"%{kw}%", TOP_K))
-                for r in cur.fetchall():
-                    if r[0] not in existing_ids:
-                        rows.append(r); existing_ids.add(r[0])
-                cur.execute("SELECT id, rule_title, article, department, url, content, 0.7 AS score FROM rule_chunks WHERE content LIKE %s LIMIT %s", (f"%{kw}%", TOP_K))
-                for r in cur.fetchall():
-                    if r[0] not in existing_ids:
-                        rows.append(r); existing_ids.add(r[0])
-
-        rows = sorted(rows, key=lambda x: x[6], reverse=True)[:TOP_K]
-        conn.close()
-    except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
-
-    if not rows or rows[0][6] < 0.15:
-        return A(answer="해당 내용을 규정에서 찾지 못했습니다. 담당 부서에 문의하세요.", sources=[], found=False)
-
-    ctx    = "\n\n".join([f"[조항 {i+1}] {r[1]} {r[2]}\n{r[5]}" for i, r in enumerate(rows)])
-
-    # ── 멀티턴: 이전 대화 히스토리 포함 ──────────────────────────────
-    groq_msgs = [{"role": "system", "content": SYSTEM}]
-
-    # 이전 user/assistant 메시지 (최근 3턴 = 6개, system 제외)
-    history = [m for m in req.messages if m.get("role") in ("user", "assistant")]
-    # 마지막 user 메시지는 현재 질문이므로 제외하고 이전 것만
-    prev = history[:-1][-6:] if len(history) > 1 else []
-    for m in prev:
-        groq_msgs.append({"role": m["role"], "content": m["content"]})
-
-    # 현재 질문에 규정 컨텍스트 포함
-    groq_msgs.append({
-        "role": "user",
-        "content": f"[참고 규정 조항]\n{ctx}\n\n[질문]\n{q}"
-    })
-
-    try:
-        resp = groq_client.chat.completions.create(
-            model=GEN_MODEL,
-            messages=groq_msgs,
-            max_tokens=1024,
-        )
-        answer = resp.choices[0].message.content
-    except Exception as e:
-        raise HTTPException(500, f"Generation error: {e}")
-
-    sources = [{"title": r[1], "article": r[2], "department": r[3], "url": r[4], "score": round(r[6], 3)} for r in rows]
-
-    import re as _re2
-    dept = ""; dept_phone = ""; followups = []
-
-    # ── 담당부서 추출 (📞 담당부서: 부서명 (...))
-    dept_m = _re2.search(r'📞\s*담당부서\s*:\s*([^\n(]+)', answer)
-    if dept_m:
-        dept = dept_m.group(1).strip()
-        for k, v in DEPT_PHONE.items():
-            if k in dept:
-                dept_phone = v; break
-        if not dept_phone:
-            dept_phone = "02-760-4114"
-
-    # ── 관련 질문 추출 (💡 섹션의 - 항목만)
-    fq_block = _re2.search(r'💡[^\n]*\n([\s\S]+?)(?:\n\n|$)', answer)
-    if fq_block:
-        followups = [
-            line.lstrip('- \t').strip()
-            for line in fq_block.group(1).splitlines()
-            if line.strip().startswith('-') and len(line.strip()) > 3
-        ][:4]
-
-    # ── 본문 정리 ─────────────────────────────────────────────────
-    import re as _re2
-
-    # 📞 담당부서 줄 제거
-    clean_answer = _re2.sub(r'\n*📞[^\n]*담당부서[^\n]*', '', answer)
-    # 💡 관련질문 섹션 전체 제거
-    clean_answer = _re2.sub(r'\n*💡[\s\S]*', '', clean_answer)
-    # "1. 제목 / 2. 본문 / 3. 출처 / 4. 담당부서" 형태 줄 제거
-    clean_answer = _re2.sub(r'(?m)^\s*\d+\s*[.\)]\s*(제목|본문|출처|담당부서|관련\s*질문)[^\n]*\n?', '', clean_answer)
-    # "제목:", "본문:" 형태 레이블 제거
-    clean_answer = _re2.sub(r'(?m)^(제목|본문)\s*[:：]\s*', '', clean_answer)
-    # 마크다운 헤더 형태 제거 (## 제목, ### 본문 등)
-    clean_answer = _re2.sub(r'(?m)^#+\s*(제목|본문|출처|담당부서)[^\n]*\n?', '', clean_answer)
-    # **제목**, **본문** 형태 볼드 제거
-    clean_answer = _re2.sub(r'\*\*(제목|본문)\*\*\s*\n?', '', clean_answer)
-    # 3줄 이상 연속 빈 줄 → 2줄로
-    clean_answer = _re2.sub(r'\n{3,}', '\n\n', clean_answer)
-    clean_answer = clean_answer.strip()
-
-    return A(answer=clean_answer, sources=sources, found=True,
-             dept=dept, dept_phone=dept_phone, followups=followups)
+def document_not_found():
+    return APIError(404, "document_not_found", "해당 문서를 찾을 수 없습니다.")
 
 
-# ── 규정 목록 ──────────────────────────────────────────────────────
-@app.get("/rules")
-def get_rules():
-    CHAP_MAP = {
-        "1": "학교법인", "2": "학칙", "3": "학사행정",
-        "4": "부속기관", "5": "부설기관", "6": "위원회",
-        "7": "산학협력단", "8": "학생군사교육단",
-    }
-    chapters = _defaultdict(list)
-
-    # ── JSON 기반 기존 규정 ────────────────────────────────────────
-    try:
-        json_path = _Path(BASE_DIR) / "hansung_rules.json"
-        if json_path.exists():
-            rules = _json.loads(json_path.read_text(encoding="utf-8"))
-            for r in rules:
-                try:
-                    title    = r.get("title", "제목 없음")
-                    raw_code = r.get("rule_code", "")
-                    if not raw_code:
-                        code_m  = _re.search(r'(\d+)-(\d+)-(\d+)', r.get("content", ""))
-                        raw_code = f"{code_m.group(1)}-{code_m.group(2)}-{code_m.group(3)}" if code_m else ""
-                    chap_num  = raw_code.split("-")[0] if raw_code else "0"
-                    chap_name = CHAP_MAP.get(chap_num, "기타")
-                    chap_key  = f"제{chap_num}편 {chap_name}" if chap_num != "0" else "기타"
-                    chapters[chap_key].append({
-                        "seq": r.get("seq", 0), "code": raw_code,
-                        "name": title, "dept": r.get("department", ""),
-                        "url": r.get("url", ""), "uploaded": False
-                    })
-                except:
-                    continue
-    except Exception:
-        pass
-
-    # ── DB 업로드 규정 — 편 분류해서 기존 챕터에 통합 ────────────
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("""
-            SELECT DISTINCT rule_title, url, department
-            FROM rule_chunks WHERE url LIKE 'upload://%'
-            ORDER BY rule_title
-        """)
-        for row in cur.fetchall():
-            rule_title, url, department = row
-            # department = "업로드:N" 형태에서 편 번호 추출
-            m_chap = _re.search(r'업로드:([1-8])', department or '')
-            chap_num  = m_chap.group(1) if m_chap else "3"
-            chap_name = CHAP_MAP.get(chap_num, "학사행정")
-            chap_key  = f"제{chap_num}편 {chap_name}"
-            chapters[chap_key].append({
-                "seq": 9999,
-                "code": f"{chap_num}-upload",
-                "name": f"📎 {rule_title}",   # 업로드 규정 표시
-                "dept": "업로드 규정",
-                "url": "", "uploaded": True
-            })
-        conn.close()
-    except Exception:
-        pass
-
-    result = []
-    for key in sorted(chapters.keys(), key=lambda x: (
-        int(_re.search(r'제(\d+)편', x).group(1)) if _re.search(r'제(\d+)편', x) else
-        (98 if x == "기타" else 99)
-    )):
-        result.append({"chapter": key, "rules": sorted(chapters[key], key=lambda x: x["code"])})
-    return {"chapters": result, "total": sum(len(c["rules"]) for c in result)}
+app = create_app()
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+
+    uvicorn.run(app, host="0.0.0.0", port=8080, proxy_headers=False)
