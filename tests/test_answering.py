@@ -9,14 +9,20 @@ from hsrule.answering import REFUSAL, CitedAnswerer, RagError, extract_json
 from tests.test_chains import StubSearcher
 
 
+SECRET = "gsk_live_abcdef123456"
+
+
 class ErrorLLM(GenericFakeChatModel):
     def _generate(self, *args, **kwargs):
-        raise TimeoutError("timeout")
+        raise RuntimeError(f"provider 401: key={SECRET} body=규정 원문 일부")
+
+
+def model_with(*texts):
+    return GenericFakeChatModel(messages=iter(AIMessage(t) for t in texts))
 
 
 def answerer(*texts, searcher=None):
-    model = GenericFakeChatModel(messages=iter(AIMessage(t) for t in texts))
-    return CitedAnswerer(model, searcher or StubSearcher())
+    return CitedAnswerer(model_with(*texts), searcher or StubSearcher())
 
 
 class EmptySearcher:
@@ -32,6 +38,9 @@ class CitationTests(unittest.TestCase):
         result = answerer(GOOD).answer("조기졸업?")
         self.assertTrue(result["found"])
         self.assertEqual(result["sources"][0]["article_id"], "제40조")
+        self.assertEqual(result["sources"][0]["source_kind"], "official_html")
+        self.assertNotIn("page_start", result["sources"][0])
+        self.assertEqual(result["sources"][0]["score"], 0.8)  # 코사인 유사도만 담는다
         self.assertEqual(result["sources"][0]["url"], "https://rule.example/20")
         self.assertEqual(result["sources"][0]["revision_id"], "20:1")
         self.assertNotIn("page_start", result["sources"][0])
@@ -65,6 +74,41 @@ class CitationTests(unittest.TestCase):
         result = CitedAnswerer(model, EmptySearcher()).answer("질문", language="en")
         self.assertEqual(result["answer"], REFUSAL["en"])
         self.assertFalse(result["found"])
+        self.assertEqual(result["reason"], "no_evidence")
+
+    def test_public_query_cannot_cite_private_material(self):
+        from tests.test_chains import StubSearcher, hit
+
+        private = StubSearcher([dict(hit(), visibility="private")])
+        with self.assertRaises(RagError) as ctx:
+            CitedAnswerer(model_with(GOOD), private).answer("비공개 인사 기준")
+        self.assertEqual((ctx.exception.code, ctx.exception.reason), ("rag_invalid_response", "scope"))
+        admin = CitedAnswerer(model_with(GOOD), private).answer("비공개 인사 기준", include_private=True)
+        self.assertTrue(admin["found"])
+
+    def test_error_reasons_are_distinct_and_hide_provider_details(self):
+        with self.assertRaises(RagError) as ctx:
+            answerer("아님", "{broken").answer("q")
+        self.assertEqual(ctx.exception.reason, "json")
+        with self.assertRaises(RagError) as ctx:
+            CitedAnswerer(ErrorLLM(messages=iter([])), StubSearcher()).answer("q")
+        self.assertEqual(ctx.exception.reason, "provider")
+        self.assertNotIn(SECRET, str(ctx.exception))
+        self.assertNotIn("규정 원문", str(ctx.exception))
+        with self.assertRaises(RagError) as ctx:
+            answerer('{"found": true, "answer": "답", "citations": ["S9"], "followups": []}').answer("q")
+        self.assertEqual(ctx.exception.reason, "citation")
+
+    def test_timeout_is_separate_from_provider_failure(self):
+        from hsrule.chains import ChainTimeout
+
+        class Slow(GenericFakeChatModel):
+            def _generate(self, *args, **kwargs):
+                raise ChainTimeout("느림")
+
+        with self.assertRaises(RagError) as ctx:
+            CitedAnswerer(Slow(messages=iter([])), StubSearcher()).answer("q")
+        self.assertEqual((ctx.exception.code, ctx.exception.reason), ("rag_backend_error", "timeout"))
 
     def test_bad_json_is_retried_once_then_rejected(self):
         self.assertTrue(answerer("이건 JSON이 아님", GOOD).answer("q")["found"])

@@ -66,7 +66,9 @@ class RegulationRetriever(BaseRetriever):
             "chunk_id": hit["id"], "regulation_id": hit["regulation_id"], "revision_id": hit["revision_id"],
             "title": hit["title"], "article_id": hit["article_id"], "official_url": hit["official_url"],
             "source_start": hit["source_start"], "source_end": hit["source_end"],
-            "found_by": hit.get("found_by", []), "score": hit.get("fused_score", 0.0),
+            "visibility": hit.get("visibility", "public"),
+            "found_by": hit.get("found_by", []), "fused_score": hit.get("fused_score", 0.0),
+            "cosine": hit.get("cosine"),
         }) for hit in hits]
 
 
