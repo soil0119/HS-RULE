@@ -3,6 +3,8 @@
 2026 한성대학교 AX 프론티어 공모전을 위한 규정 검색 AI 웹 서비스입니다.
 한성대학교 규정관리시스템의 규정을 수집하고, 관련 조항을 검색해 답변과 근거를 제공합니다.
 
+현재 공개 UI: **[hs.officeworkkit.com](https://hs.officeworkkit.com)**. 새 UI만 Cloudflare에 배포했으며, 질문·로그인·문서 처리 API와 RAG는 후속 연결 대상입니다. [배포·재배포 안내](docs/deployment.md)를 참고하세요.
+
 첨부 프로젝트 `Hansung_AX-update_crawler.zip`을 기반으로 구성했습니다.
 FastAPI·HTML 화면, Groq 답변 생성, 로컬 문장 임베딩, PostgreSQL/pgvector를 사용합니다.
 
