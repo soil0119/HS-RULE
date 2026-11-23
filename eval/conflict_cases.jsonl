@@ -1,0 +1,5 @@
+{"id": "conflict-early-grad", "type": "conflict", "language": "ko", "filename": "학사지침_초안.txt", "document": "본 지침은 소속 학생이 5학기만에 전 과정을 이수한 경우 조기졸업을 허용한다.\n\n조기졸업 신청은 학과장 승인만으로 처리하며 별도 제출 기한을 두지 않는다.", "expected_articles": ["제40조"]}
+{"id": "conflict-grade-scale", "type": "conflict", "language": "ko", "filename": "성적처리안내.txt", "document": "A+ 학점은 90점 이상에 부여하고 평점은 4.3으로 환산한다.\n\n재수강 과목은 F 학점도 평점평균에 넣지 않는다.", "expected_articles": ["제32조"]}
+{"id": "compliant-early-grad", "type": "compliant", "language": "ko", "filename": "조기졸업_안내.txt", "document": "조기졸업은 7학기만에 4학년 전 과정을 이수하고 전체 평점평균이 4.0 이상이며 과락이 없는 학생이 신청할 수 있다.", "expected_articles": []}
+{"id": "unrelated-parking", "type": "unrelated", "language": "ko", "filename": "주차_안내.txt", "document": "교내 주차 요금은 최초 30분 무료이고 이후 10분마다 500원을 받는다.", "expected_articles": []}
+{"id": "long-document", "type": "long_document", "language": "ko", "filename": "긴_지침.txt", "document": "PLACEHOLDER", "expected_articles": ["제40조"], "repeat_filler": 40}

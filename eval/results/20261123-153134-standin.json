@@ -1,0 +1,214 @@
+{
+  "mode": "standin",
+  "claim": "대역 임베딩으로 파이프라인만 점검한 결과이며 모델 품질을 뜻하지 않는다.",
+  "run_at": "2026-11-23T15:31:34+00:00",
+  "versions": {
+    "git_commit": "3336e88",
+    "python": "3.13.18",
+    "corpus_sha256": "1accd0bf7d111d4afa7e36adcbbe9fc46dfcdb0ccb277c85587ebc970a765d01",
+    "corpus_revisions": [
+      "20:1623"
+    ],
+    "eval_set_sha256": "60033641c3e628b2d8839c004cb9f8a7a17af4067c0d94f83262f35221b822f5",
+    "eval_cases": 17,
+    "embedding_model": "fake-char-bigram-384",
+    "chunk_params": {
+      "max_tokens": 128,
+      "overlap_tokens": 16
+    },
+    "tokenizer": "TokenizersBackend",
+    "groq_model": null,
+    "prompt_sha256": "9417fa462e03fc6ac53f0991942ece35c39d966d5ba51a0cd0d72e6164fc622f"
+  },
+  "retrieval": {
+    "hybrid": {
+      "cases": 11,
+      "recall": {
+        "@1": 1.0,
+        "@3": 1.0,
+        "@5": 1.0
+      },
+      "mrr": 1.0
+    },
+    "keyword_only": {
+      "cases": 11,
+      "recall": {
+        "@1": 0.8181818181818182,
+        "@3": 1.0,
+        "@5": 1.0
+      },
+      "mrr": 0.9090909090909091
+    },
+    "vector_only": {
+      "cases": 11,
+      "recall": {
+        "@1": 0.7272727272727273,
+        "@3": 1.0,
+        "@5": 1.0
+      },
+      "mrr": 0.8484848484848485
+    },
+    "per_case": [
+      {
+        "id": "exact-32",
+        "type": "exact_article",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "exact-3-2",
+        "type": "exact_article",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "keyword-early-grad",
+        "type": "keyword",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "short-early-grad",
+        "type": "short_query",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "short-credit",
+        "type": "short_query",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "wrong-name-early-grad",
+        "type": "wrong_regulation_name",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "wrong-name-grade",
+        "type": "wrong_regulation_name",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "synonym-grade-point",
+        "type": "synonym",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "table-a-plus",
+        "type": "table",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "cross-ref-3",
+        "type": "cross_reference",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      },
+      {
+        "id": "addendum-2025",
+        "type": "addendum",
+        "rank": 1,
+        "revision": "20:1623",
+        "url_ok": true
+      }
+    ],
+    "skipped": [
+      {
+        "id": "followup-grad",
+        "reason": "후속 질문은 질문 재작성에 LLM이 필요함"
+      },
+      {
+        "id": "english-early-grad",
+        "reason": "영어 질의는 다국어 임베딩이 필요하며 대역 임베딩으로는 측정 불가"
+      },
+      {
+        "id": "english-grade-table",
+        "reason": "영어 질의는 다국어 임베딩이 필요하며 대역 임베딩으로는 측정 불가"
+      }
+    ],
+    "deleted_article_regressions": [],
+    "search_latency_seconds": {
+      "p50": 0.032377032000113104,
+      "p95": 0.06062573999997767
+    }
+  },
+  "answers": null,
+  "conflicts": {
+    "cases": 5,
+    "candidate_recall_mean": 1.0,
+    "per_case": [
+      {
+        "id": "conflict-early-grad",
+        "type": "conflict",
+        "expected": [
+          "제40조"
+        ],
+        "candidate_recall": 1.0
+      },
+      {
+        "id": "conflict-grade-scale",
+        "type": "conflict",
+        "expected": [
+          "제32조"
+        ],
+        "candidate_recall": 1.0
+      },
+      {
+        "id": "compliant-early-grad",
+        "type": "compliant",
+        "expected": [],
+        "candidate_recall": null
+      },
+      {
+        "id": "unrelated-parking",
+        "type": "unrelated",
+        "expected": [],
+        "candidate_recall": null
+      },
+      {
+        "id": "long-document",
+        "type": "long_document",
+        "expected": [
+          "제40조"
+        ],
+        "candidate_recall": 1.0
+      }
+    ]
+  },
+  "regressions": {
+    "private_not_leaked": true,
+    "admin_sees_private": true,
+    "new_revision_is_served": true,
+    "old_revision_not_served": true,
+    "deleted_article_excluded": true,
+    "index_failure_rejected": true,
+    "bad_citation_rejected": true,
+    "all_passed": true
+  },
+  "retrieval_limits": {
+    "k": 5,
+    "candidates": 20,
+    "max_query_chars": 2000,
+    "min_cosine": 0.25,
+    "search_timeout_ms": 5000
+  },
+  "not_measured": {
+    "answer_quality": "실제 Groq 모델이 없는 standin 모드: 인용 일치·무근거 답변·거절은 측정하지 않음",
+    "conflict_quality": "실제 Groq 모델이 없는 standin 모드: 충돌 지적 정확도는 측정하지 않고 후보 재현율만 기록"
+  }
+}
