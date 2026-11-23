@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.exceptions import HTTPException
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hsrule_web.auth import LoginLimiter, LoginRequest, LoginResponse, issue_token, optional_admin, require_admin
 from hsrule_web.contracts import (
@@ -18,6 +19,7 @@ from hsrule_web.contracts import (
 )
 from hsrule_web.documents import DOCUMENT_ID_PATTERN, DocumentMetadata, DocumentStore, Visibility, read_upload
 from hsrule_web.errors import APIError, error_response
+from hsrule_web.file_response import SourcePDFResponse
 from hsrule_web.settings import BASE_DIR, Settings
 from routers.teacher import router as teacher_router
 
@@ -52,8 +54,6 @@ def create_app(
     app.state.document_store = document_store
     app.state.rag_backend = rag_backend
     login_limiter = LoginLimiter()
-    # ponytail: per-worker admission for requests with bodies or DB reads.
-    requests_in_flight = BoundedSemaphore(8)
 
     app.add_middleware(
         CORSMiddleware,
@@ -68,17 +68,8 @@ def create_app(
     @app.middleware("http")
     async def request_boundary(request: Request, call_next):
         request.state.request_id = uuid4().hex
-        acquired = False
         try:
-            if not valid_host(request.headers.get("host", ""), allowed_hosts):
-                raise APIError(400, "invalid_host", "허용되지 않은 호스트입니다.")
             path = request.url.path
-            if (request.method in ("POST", "DELETE") or path in ("/health", "/rules", "/uploaded-rules")
-                    or path.startswith("/documents/")):
-                acquired = requests_in_flight.acquire(blocking=False)
-                if not acquired:
-                    raise APIError(429, "request_limit", "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
-                                   {"Retry-After": "1"})
             # Route body limits also count streamed requests without Content-Length.
             limit = BODY_LIMITS.get(path) if request.method == "POST" else None
             length = request.headers.get("content-length")
@@ -104,20 +95,10 @@ def create_app(
             response = error_response(request, error)
         except Exception:
             response = error_response(request, APIError(500, "internal_error", "요청을 처리하지 못했습니다."))
-        finally:
-            if acquired:
-                requests_in_flight.release()
-        # Middleware-generated errors still need the allowed-origin headers for browsers.
-        origin = request.headers.get("origin")
-        if (response.status_code >= 400 and "access-control-request-method" not in request.headers and origin
-                and (origin == public_origin or DEV_ORIGIN.fullmatch(origin))):
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Expose-Headers"] = ", ".join(EXPOSE_HEADERS)
-            if "Vary" not in response.headers:
-                response.headers.add_vary_header("Origin")
-        response.headers["X-Request-ID"] = request.state.request_id
-        response.headers["Cache-Control"] = "no-store"
+        set_response_headers(request, response, public_origin)
         return response
+
+    app.add_middleware(RequestAdmission, allowed_hosts=allowed_hosts, public_origin=public_origin)
 
     @app.exception_handler(APIError)
     async def handle_api_error(request: Request, error: APIError):
@@ -220,14 +201,12 @@ def create_app(
     def document_metadata(document_id: DocumentId, admin: bool = Depends(optional_admin)):
         return find_document(document_id, admin)
 
-    @app.get("/documents/{document_id}/file", response_class=FileResponse)
+    @app.get("/documents/{document_id}/file", response_class=SourcePDFResponse)
     def document_file(document_id: DocumentId, admin: bool = Depends(optional_admin)):
         metadata = find_document(document_id, admin)
         path = get_store().file_path(document_id)
-        if not path.is_file():
-            raise document_not_found()
-        return FileResponse(path, media_type="application/pdf", filename=metadata.filename,
-                            content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff"})
+        return SourcePDFResponse(path, media_type="application/pdf", filename=metadata.filename,
+                                 content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff"})
 
     @app.post("/query", response_model=QueryResponse, response_model_exclude_none=True, max_body_size=MAX_JSON_BODY)
     def query(data: QueryRequest):
@@ -242,6 +221,54 @@ def create_app(
         return QueryResponse(**result.model_dump(exclude={"sources"}), sources=sources)
 
     return app
+
+
+def set_response_headers(request: Request, response, public_origin: str) -> None:
+    # Middleware-generated errors still need the allowed-origin headers for browsers.
+    origin = request.headers.get("origin")
+    if (response.status_code >= 400 and "access-control-request-method" not in request.headers and origin
+            and (origin == public_origin or DEV_ORIGIN.fullmatch(origin))):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(EXPOSE_HEADERS)
+        if "Vary" not in response.headers:
+            response.headers.add_vary_header("Origin")
+    response.headers["X-Request-ID"] = request.state.request_id
+    response.headers["Cache-Control"] = "no-store"
+
+
+class RequestAdmission:
+    def __init__(self, app: ASGIApp, allowed_hosts: tuple[str, ...], public_origin: str):
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+        self.public_origin = public_origin
+        # ponytail: this ceiling covers all admitted ASGI work per worker.
+        self.slots = BoundedSemaphore(8)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+        try:
+            if not valid_host(request.headers.get("host", ""), self.allowed_hosts):
+                raise APIError(400, "invalid_host", "허용되지 않은 호스트입니다.")
+            path = scope["path"]
+            limited = (request.method in ("POST", "DELETE") or path in ("/health", "/rules", "/uploaded-rules")
+                       or path.startswith("/documents/"))
+            if limited and not self.slots.acquire(blocking=False):
+                raise APIError(429, "request_limit", "요청이 많습니다. 잠시 후 다시 시도해 주세요.",
+                               {"Retry-After": "1"})
+        except APIError as error:
+            request.state.request_id = uuid4().hex
+            response = error_response(request, error)
+            set_response_headers(request, response, self.public_origin)
+            await response(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if limited:
+                self.slots.release()
 
 
 def valid_host(authority: str, allowed_hosts: tuple[str, ...]) -> bool:

@@ -1,4 +1,6 @@
+import asyncio
 import io
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -104,11 +106,17 @@ class WebAPITests(unittest.TestCase):
         response = self.client.get(f"/documents/{PUBLIC}/file", headers={"Range": "bytes=0-4"})
         self.assertEqual(response.status_code, 206, response.text)
         self.assertEqual(response.content, b"%PDF-")
+        multiple = self.client.get(f"/documents/{PUBLIC}/file", headers={"Range": "bytes=0-4,8-9"})
+        self.assertEqual(multiple.status_code, 206, multiple.text)
+        self.assertIn("multipart/byteranges", multiple.headers["content-type"])
+        self.assertIn(b"%PDF-", multiple.content)
         invalid_range = self.client.get(f"/documents/{PUBLIC}/file", headers={"Range": "bytes=999999-"})
         self.assert_error(invalid_range, 416, "invalid_range")
         self.assertTrue(invalid_range.headers["content-range"].startswith("bytes */"))
         self.assertIn("inline", response.headers["Content-Disposition"])
         self.assert_error(self.client.get(f"/documents/{MISSING}/file"), 404, "document_not_found")
+        self.store.file_path(PUBLIC).unlink()
+        self.assert_error(self.client.get(f"/documents/{PUBLIC}/file"), 404, "document_not_found")
 
     def test_admin_guards_prevent_unauthorized_upload_delete_and_conflict(self):
         file = {"file": ("x.pdf", make_pdf("text"), "application/pdf")}
@@ -265,3 +273,70 @@ class WebAPITests(unittest.TestCase):
         response = self.client.post("/query", headers={"Content-Type": "application/json"},
                                     content=iter([b"x" * 600000, b"x" * 600000]))
         self.assert_error(response, 413)
+
+class WebStreamingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from hsrule_web.settings import Settings
+        from server import create_app
+
+        self.store = FixtureStore(self.enterContext(tempfile.TemporaryDirectory()))
+        self.app = create_app(Settings(allowed_hosts=("testserver",)), document_store=self.store)
+
+    async def get(self, path, on_start=None, *, extensions=None):
+        scope = {
+            "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
+            "query_string": b"", "headers": [(b"host", b"testserver")],
+            "server": ("testserver", 80), "client": ("127.0.0.1", 1234),
+            "extensions": extensions or {},
+        }
+        messages = []
+
+        async def receive():
+            await asyncio.Future()
+
+        async def send(message):
+            messages.append(message)
+            if message["type"] == "http.response.start" and on_start is not None:
+                await on_start()
+
+        await self.app(scope, receive, send)
+        return messages
+
+    async def test_expensive_request_slots_remain_reserved_until_body_finishes(self):
+        all_started = asyncio.Event()
+        finish = asyncio.Event()
+        count = 0
+
+        async def on_start():
+            nonlocal count
+            count += 1
+            if count == 8:
+                all_started.set()
+            await finish.wait()
+
+        requests = [asyncio.create_task(self.get(f"/documents/{PUBLIC}/file", on_start)) for _ in range(8)]
+        try:
+            await asyncio.wait_for(all_started.wait(), timeout=5)
+            self.assertEqual((await self.get("/rules"))[0]["status"], 429)
+            self.assertEqual((await self.get("/health/live"))[0]["status"], 200)
+        finally:
+            finish.set()
+            results = await asyncio.gather(*requests)
+        self.assertEqual([result[0]["status"] for result in results], [200] * 8)
+        self.assertEqual((await self.get("/rules"))[0]["status"], 200)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows prevents unlink while the PDF is open")
+    async def test_open_pdf_remains_readable_when_catalog_file_is_removed_after_response_starts(self):
+        source = self.store.file_path(PUBLIC)
+        original = source.read_bytes()
+
+        async def remove_original():
+            source.unlink()
+
+        messages = await self.get(f"/documents/{PUBLIC}/file", remove_original,
+                                  extensions={"http.response.pathsend": {}})
+        self.assertEqual(messages[0]["status"], 200)
+        self.assertFalse(source.exists())
+        self.assertEqual(b"".join(msg["body"] for msg in messages if msg["type"] == "http.response.body"),
+                         original)
