@@ -17,3 +17,5 @@ lxml==6.1.3
 pyhwp==0.1b15
 # pyhwp imports six but omits it from its dependency metadata.
 six==1.17.0
+langchain-core==1.8.4
+langchain-groq==1.2.1
