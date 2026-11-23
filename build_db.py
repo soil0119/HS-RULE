@@ -1,93 +1,58 @@
-import json, re, os
+import argparse
+import os
+import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
-import psycopg2
-from psycopg2.extras import execute_values
-from sentence_transformers import SentenceTransformer
 
-load_dotenv()
+from hsrule.embeddings import LocalEmbeddings
+from hsrule.pdf_ingestion import MAX_PDF_BYTES, PdfIngestionError, store_pdf
+from hsrule.repository import DuplicateDocumentError, RegulationRepository
 
-DB_URL = os.getenv("DATABASE_URL")
-if not DB_URL:
-    raise RuntimeError("❌ DATABASE_URL이 .env에 설정되지 않았습니다.")
+PROJECT_ROOT = Path(__file__).resolve().parent
+UPLOAD_DIR = PROJECT_ROOT / "uploads"
 
-INPUT     = "hansung_rules.json"
-EMB_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-BATCH     = 64
-DIM       = 384
 
-print(f"모델 로딩 중: {EMB_MODEL}")
-model = SentenceTransformer(EMB_MODEL)
-print("모델 로딩 완료!")
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="규정 PDF를 페이지별로 색인합니다.")
+    parser.add_argument("files", metavar="PDF", type=Path, nargs="*")
+    parser.add_argument("--visibility", choices=["private", "public"], default="private")
+    parser.add_argument("--init-only", action="store_true", help="빈 데이터베이스의 스키마를 준비합니다.")
+    args = parser.parse_args(argv)
+    if bool(args.files) == args.init_only:
+        parser.error("PDF 경로를 지정하거나 --init-only를 사용하세요.")
 
-def chunk_rule(rule):
-    content = rule.get("content", "")
-    code_m  = re.search(r"\d+-\d+-\d+\S*\s*\n\s*(.+)", content)
-    title   = code_m.group(1).strip() if code_m else rule.get("title", "")
-    seq     = str(rule.get("seq", ""))
-    url     = rule.get("url", "")
-    dept    = rule.get("department", "")
-    pat     = re.compile(r'(제\s*\d+\s*조(?:의\s*\d+)?(?:\s*\([^)]*\))?)', re.M)
-    parts   = pat.split(content)
-    chunks  = []
-    if len(parts) > 1:
-        i = 1
-        while i < len(parts) - 1:
-            hdr  = parts[i].strip()
-            body = parts[i+1].strip() if i+1 < len(parts) else ""
-            if len(body) > 10:
-                art = re.sub(r'\s+', '', hdr)
-                chunks.append({"id": f"r{seq}_{art}", "text": f"[{title}] {hdr}\n{body[:1500]}", "rule_title": title, "seq": seq, "article": art, "department": dept, "url": url})
-            i += 2
-    if not chunks and len(content) > 20:
-        chunks.append({"id": f"r{seq}_full", "text": f"[{title}]\n{content[:2000]}", "rule_title": title, "seq": seq, "article": "full", "department": dept, "url": url})
-    return chunks
+    load_dotenv(PROJECT_ROOT / ".env")
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL을 설정하세요.", file=sys.stderr)
+        return 1
+    repo = RegulationRepository(url)
+    try:
+        repo.initialize()
+    except Exception:
+        print("데이터베이스 스키마를 준비할 수 없습니다.", file=sys.stderr)
+        return 1
+    if args.init_only:
+        print("데이터베이스 스키마를 준비했습니다.")
+        return 0
 
-def main():
-    rules = json.loads(Path(INPUT).read_text(encoding="utf-8"))
-    print(f"{len(rules)} rules loaded")
-
-    all_chunks = []
-    for r in rules:
-        all_chunks.extend(chunk_rule(r))
-    print(f"{len(all_chunks)} chunks created")
-
-    conn = psycopg2.connect(DB_URL)
-    cur  = conn.cursor()
-    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    cur.execute("DROP TABLE IF EXISTS rule_chunks;")
-    cur.execute(f"""
-        CREATE TABLE rule_chunks (
-            id         TEXT PRIMARY KEY,
-            rule_title TEXT,
-            seq        TEXT,
-            article    TEXT,
-            department TEXT,
-            url        TEXT,
-            content    TEXT,
-            embedding  vector({DIM})
-        );
-    """)
-    conn.commit()
-    print("Table created")
-
-    total = len(all_chunks)
-    for i in range(0, total, BATCH):
-        batch = all_chunks[i:i+BATCH]
+    embeddings = LocalEmbeddings()
+    failed = False
+    for source in args.files:
         try:
-            embeddings = model.encode([c["text"] for c in batch], normalize_embeddings=True).tolist()
-            rows = [(c["id"], c["rule_title"], c["seq"], c["article"], c["department"], c["url"], c["text"], emb)
-                    for c, emb in zip(batch, embeddings)]
-            execute_values(cur, "INSERT INTO rule_chunks (id,rule_title,seq,article,department,url,content,embedding) VALUES %s ON CONFLICT (id) DO NOTHING", rows)
-            conn.commit()
-            print(f"  {min(i+BATCH, total)}/{total}")
-        except Exception as e:
-            print(f"  batch error: {e}")
-            conn.rollback()
+            with source.open("rb") as file:
+                data = file.read(MAX_PDF_BYTES + 1)
+            saved = store_pdf(data, source.name, repo, embeddings, UPLOAD_DIR, visibility=args.visibility)
+            print(f"{source.name} → {saved['id']} ({saved['chunks']}개 청크, {saved['visibility']})")
+        except (PdfIngestionError, DuplicateDocumentError, OSError) as exc:
+            print(f"{source.name}: {exc}", file=sys.stderr)
+            failed = True
+        except Exception:
+            print(f"{source.name}: 색인 중 오류가 발생했습니다.", file=sys.stderr)
+            failed = True
+    return int(failed)
 
-    cur.close()
-    conn.close()
-    print("Done!")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

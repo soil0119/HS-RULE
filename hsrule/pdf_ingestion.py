@@ -1,7 +1,7 @@
 import hashlib
 import io
 import re
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from pdfminer.high_level import extract_pages
@@ -15,8 +15,12 @@ ARTICLE_HEADER = re.compile(
 )
 
 
-class PDFValidationError(ValueError):
+class PdfIngestionError(ValueError):
     """The supplied PDF cannot be indexed."""
+
+    def __init__(self, message: str, code: str = "invalid_pdf"):
+        super().__init__(message)
+        self.code = code
 
 
 def _text_blocks(layout):
@@ -30,30 +34,30 @@ def _text_blocks(layout):
 def load_pdf(data: bytes, filename: str, title: str | None = None,
              visibility: str = "private", document_id: str | None = None) -> dict:
     if visibility not in ("private", "public"):
-        raise PDFValidationError("공개 범위가 올바르지 않습니다.")
+        raise PdfIngestionError("공개 범위가 올바르지 않습니다.", "invalid_visibility")
     if len(data) > MAX_PDF_BYTES:
-        raise PDFValidationError("PDF는 최대 20 MiB까지 허용합니다.")
+        raise PdfIngestionError("PDF는 최대 20 MiB까지 허용합니다.", "file_too_large")
     if b"%PDF-" not in data[:1024] or b"%%EOF" not in data[-1024:]:
-        raise PDFValidationError("손상된 PDF이거나 PDF 형식이 아닙니다.")
+        raise PdfIngestionError("손상된 PDF이거나 PDF 형식이 아닙니다.")
 
     pages, indexed_pages, warnings = [], [], []
     try:
         layouts = extract_pages(io.BytesIO(data), laparams=LAParams(all_texts=True))
         for number, layout in enumerate(layouts, 1):
             if number > MAX_PDF_PAGES:
-                raise PDFValidationError("PDF는 최대 1,000페이지까지 허용합니다.")
+                raise PdfIngestionError("PDF는 최대 1,000페이지까지 허용합니다.", "too_many_pages")
             text = "".join(_text_blocks(layout)).rstrip("\n")
             pages.append({"page_number": number, "text": text})
             if text.strip():
                 indexed_pages.append(number)
             else:
                 warnings.append(f"{number}페이지에서 텍스트를 추출하지 못했습니다.")
-    except PDFValidationError:
+    except PdfIngestionError:
         raise
     except Exception as exc:
-        raise PDFValidationError("PDF를 읽을 수 없습니다.") from exc
+        raise PdfIngestionError("PDF를 읽을 수 없습니다.") from exc
     if not indexed_pages:
-        raise PDFValidationError("PDF에 추출 가능한 텍스트가 없습니다.")
+        raise PdfIngestionError("PDF에 추출 가능한 텍스트가 없습니다.", "no_text")
 
     name = PureWindowsPath(filename).name or "document.pdf"
     return {
@@ -124,3 +128,21 @@ def chunk_pages(document: dict, tokenizer, max_tokens: int = 128, overlap_tokens
                     "article": article, "content": content, "embedding_text": embedding_text,
                 })
     return chunks
+
+
+def store_pdf(data: bytes, filename: str, repository, embeddings, upload_dir: Path,
+              *, title: str | None = None, visibility: str = "private") -> dict:
+    document = load_pdf(data, filename, title, visibility)
+    chunks = chunk_pages(document, embeddings.tokenizer)
+    document["chunks"] = chunks
+    vectors = embeddings.embed_documents([chunk["embedding_text"] for chunk in chunks])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / (document["id"] + ".pdf")
+    output = path.open("xb")
+    try:
+        with output:
+            output.write(data)
+        return repository.save_document(document, vectors)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
