@@ -201,76 +201,111 @@ class OfficialRepository:
             return cursor.fetchone()
     # ---- 검색 (#26) ----
     # 후보는 항상 (1) 현재 개정 또는 지정한 개정, (2) 권한 범위, (3) 삭제 조항 제외 조건을 거친다.
+    # 조건은 모두 hs_reg_chunks의 열이므로 부분 인덱스 스캔 단계에서 적용되고 LIMIT 이후로 밀리지 않는다.
     _CANDIDATE = """
         c.id, c.revision_id, c.regulation_id, r.title, r.official_url, c.article_id, c.kind, c.chapter,
         c.content, c.source_start, c.source_end, c.refs, c.deleted, r.is_current
     """
+    SEARCH_TIMEOUT_MS = 5_000
+    EF_SEARCH = 200
 
     @staticmethod
     def _scope(include_private, regulation_ids, revision_ids, include_deleted):
         clauses, params = [], []
         if revision_ids:
+            revision_ids = list(dict.fromkeys(revision_ids))
             clauses.append("c.revision_id = ANY(%s)")
-            params.append(list(revision_ids))
+            params.append(revision_ids)
         else:
-            clauses.append("r.is_current")
+            clauses.append("c.searchable")
         if regulation_ids:
             clauses.append("c.regulation_id = ANY(%s)")
             params.append(list(regulation_ids))
         if not include_private:
-            clauses.append("r.visibility = 'public'")
+            clauses.append("c.visibility = 'public'")
         if not include_deleted:
             clauses.append("NOT c.deleted")
         return " AND ".join(clauses), params
 
+    def _guard_revisions(self, revision_ids) -> None:
+        """한 규정의 두 개정을 함께 검색하지 않는다. 같은 조항이 개정별로 중복 근거가 된다."""
+        if not revision_ids:
+            return
+        with self.cursor() as cursor:
+            cursor.execute("""
+                SELECT regulation_id, count(*) AS revisions FROM hs_reg_revisions
+                WHERE revision_id = ANY(%s) GROUP BY regulation_id HAVING count(*) > 1
+            """, (list(dict.fromkeys(revision_ids)),))
+            mixed = [row["regulation_id"] for row in cursor.fetchall()]
+        if mixed:
+            raise ValueError(f"한 규정의 여러 개정을 함께 검색할 수 없습니다: {', '.join(mixed)}")
+
+    @contextmanager
+    def _search_cursor(self):
+        with self.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = %s", (self.SEARCH_TIMEOUT_MS,))
+            yield cursor
+
+    @staticmethod
+    def _ordered(rows: list[dict]) -> list[dict]:
+        # 벡터 질의는 인덱스가 정렬을 제공해야 하므로 SQL에서 2차 키를 쓰지 않고 여기서 동순위를 정한다.
+        return sorted(rows, key=lambda row: (-float(row["score"]), row["id"]))
+
     def vector_candidates(self, embedding, *, limit=20, include_private=False, regulation_ids=None,
                           revision_ids=None, include_deleted=False) -> list[dict]:
+        """코사인 유사도 상위 후보. score는 1 - 코사인 거리이며 score_kind는 cosine이다."""
+        self._guard_revisions(revision_ids)
         where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
         literal = vector_literal(embedding)
-        with self.cursor() as cursor:
-            cursor.execute("SET LOCAL hnsw.ef_search = 200")
+        with self._search_cursor() as cursor:
+            cursor.execute("SET LOCAL hnsw.ef_search = %s", (self.EF_SEARCH,))
             cursor.execute(f"""
                 SELECT {self._CANDIDATE}, 1 - (c.embedding <=> %s::vector) AS score
                 FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
-                WHERE {where} ORDER BY c.embedding <=> %s::vector, c.id LIMIT %s
+                WHERE {where} ORDER BY c.embedding <=> %s::vector LIMIT %s
             """, [literal, *params, literal, max(0, min(limit, 100))])
-            return cursor.fetchall()
+            rows = [dict(row, score_kind="cosine") for row in cursor.fetchall()]
+        return self._ordered(rows)
 
     def keyword_candidates(self, terms: list[str], *, limit=20, include_private=False, regulation_ids=None,
                            revision_ids=None, include_deleted=False) -> list[dict]:
-        terms = [t.lower() for t in dict.fromkeys(terms) if t][:12]
+        """용어 포함 수 기반 후보. score는 유사도가 아니라 어휘 일치 점수이며 score_kind는 lexical이다."""
+        terms = [normalize_search_text(t) for t in dict.fromkeys(terms) if t][:12]
         if not terms:
             return []
+        self._guard_revisions(revision_ids)
         where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
-        with self.cursor() as cursor:
+        with self._search_cursor() as cursor:
             cursor.execute(f"""
                 SELECT {self._CANDIDATE}, lexical.matched::float + lexical.hits::float / 1000 AS score
                 FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
                 CROSS JOIN LATERAL (
-                    SELECT sum((strpos(lower(c.content), term) > 0)::int
+                    SELECT sum((strpos(c.search_text, term) > 0)::int
                                + (strpos(lower(c.article_id), term) > 0)::int) AS matched,
-                           sum((length(c.content) - length(replace(lower(c.content), term, '')))
+                           sum((length(c.search_text) - length(replace(c.search_text, term, '')))
                                / length(term)) AS hits
                     FROM unnest(%s::text[]) AS term
                 ) lexical
                 WHERE {where} AND lexical.matched > 0
                 ORDER BY score DESC, c.id LIMIT %s
             """, [terms, *params, max(0, min(limit, 100))])
-            return cursor.fetchall()
+            return [dict(row, score_kind="lexical") for row in cursor.fetchall()]
 
     def article_candidates(self, article_ids: list[str], *, limit=20, include_private=False,
                            regulation_ids=None, revision_ids=None, include_deleted=False) -> list[dict]:
+        """조항 ID 완전 일치 후보. 유사도가 아니므로 score는 없고 score_kind는 exact다."""
         if not article_ids:
             return []
+        self._guard_revisions(revision_ids)
         where, params = self._scope(include_private, regulation_ids, revision_ids, include_deleted)
-        with self.cursor() as cursor:
+        with self._search_cursor() as cursor:
             cursor.execute(f"""
-                SELECT {self._CANDIDATE}, 1.0 AS score
+                SELECT {self._CANDIDATE}
                 FROM hs_reg_chunks c JOIN hs_reg_revisions r USING (revision_id)
                 WHERE {where} AND c.article_id = ANY(%s)
                 ORDER BY c.revision_id, c.ordinal LIMIT %s
             """, [*params, list(article_ids), max(0, min(limit, 100))])
-            return cursor.fetchall()
+            return [dict(row, score=None, score_kind="exact") for row in cursor.fetchall()]
 
     def chunks_of(self, revision_id: str) -> list[dict]:
         with self.cursor() as cursor:
