@@ -182,6 +182,24 @@ class OfficialRepository:
             cursor.execute("SELECT DISTINCT regulation_id FROM hs_reg_revisions ORDER BY regulation_id")
             return [row["regulation_id"] for row in cursor.fetchall()]
 
+    # ---- 색인 실행 기록 (#25) ----
+    def start_run(self, embedding_model: str, revision_ids: list[str]) -> int:
+        with self.cursor() as cursor:
+            cursor.execute("INSERT INTO hs_reg_index_runs (embedding_model, snapshot_revisions) "
+                           "VALUES (%s, %s) RETURNING id", (embedding_model, Json(revision_ids)))
+            return cursor.fetchone()["id"]
+
+    def finish_run(self, run_id: int, report: dict, ok: bool) -> None:
+        with self.cursor() as cursor:
+            cursor.execute("UPDATE hs_reg_index_runs SET finished_at = now(), report = %s, ok = %s WHERE id = %s",
+                           (Json(report), ok, run_id))
+
+    def last_run(self) -> dict | None:
+        with self.cursor() as cursor:
+            cursor.execute("SELECT id, started_at, finished_at, embedding_model, snapshot_revisions, report, ok "
+                           "FROM hs_reg_index_runs ORDER BY started_at DESC, id DESC LIMIT 1")
+            return cursor.fetchone()
+
     def chunks_of(self, revision_id: str) -> list[dict]:
         with self.cursor() as cursor:
             cursor.execute("SELECT id, ordinal, article_id, kind, source_start, source_end, content, "
