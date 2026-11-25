@@ -66,7 +66,9 @@ class RegulationRetriever(BaseRetriever):
             "chunk_id": hit["id"], "regulation_id": hit["regulation_id"], "revision_id": hit["revision_id"],
             "title": hit["title"], "article_id": hit["article_id"], "official_url": hit["official_url"],
             "source_start": hit["source_start"], "source_end": hit["source_end"],
-            "found_by": hit.get("found_by", []), "score": hit.get("fused_score", 0.0),
+            "visibility": hit.get("visibility", "public"),
+            "found_by": hit.get("found_by", []), "fused_score": hit.get("fused_score", 0.0),
+            "cosine": hit.get("cosine"),
         }) for hit in hits]
 
 
@@ -175,6 +177,20 @@ class RegulationChain:
         return (self._answer_prompt | self.llm | StrOutputParser()).invoke({
             "system": ANSWER_SYSTEM[inputs["language"]], "evidence": inputs["evidence"],
             "history": inputs["history"], "question": inputs["question"]})
+
+    def prepare(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
+                language: str = "ko") -> dict:
+        """답변 생성 전까지(검색 질문 → 검색 → 근거 문자열)만 실행한다."""
+        if language not in LANGUAGES:
+            raise ValueError("language는 ko 또는 en이어야 합니다.")
+        if not question.strip():
+            raise ValueError("질문이 비어 있습니다.")
+        inputs = {"question": question.strip()[:2000], "history": to_messages(messages, self.history_limit),
+                  "include_private": include_private, "language": language}
+        inputs["search_query"] = self._search_query(inputs)
+        inputs["docs"] = self._retrieve(inputs)
+        inputs["evidence"] = format_evidence(inputs["docs"], language)
+        return inputs
 
     def invoke(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
                language: str = "ko") -> dict:

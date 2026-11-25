@@ -204,7 +204,7 @@ class OfficialRepository:
     # 조건은 모두 hs_reg_chunks의 열이므로 부분 인덱스 스캔 단계에서 적용되고 LIMIT 이후로 밀리지 않는다.
     _CANDIDATE = """
         c.id, c.revision_id, c.regulation_id, r.title, r.official_url, c.article_id, c.kind, c.chapter,
-        c.content, c.source_start, c.source_end, c.refs, c.deleted, r.is_current
+        c.content, c.source_start, c.source_end, c.refs, c.deleted, c.visibility, r.is_current
     """
     SEARCH_TIMEOUT_MS = 5_000
     EF_SEARCH = 200
