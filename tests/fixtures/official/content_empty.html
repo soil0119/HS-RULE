@@ -1,0 +1,56 @@
+
+
+
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<meta http-equiv="Content-TYPE" content="text/html; charset=UTF-8" />
+<link type="text/css" rel="stylesheet"
+	href="/css/service/lawdetailcontent.css" />
+<link type="text/css" rel="stylesheet" href="/css/service/common.css" />
+<script type="text/javascript" src="/jquery/jquery-1.12.4.min.js"></script>
+<script type="text/javascript" src="/lmxmng/javascript/searchKeyword.js"></script>
+<script type="text/javascript" src="/lmxmng/javascript/link.js"></script>
+<script type="text/javascript" src="/lmxmng/javascript/common.js"></script>
+<script type="text/javascript" src="/lmxsrv/javascript/bookMark.js"></script>
+<script type="text/javascript" src="/lmxsrv/javascript/lmxUtil.js"></script>
+<script type="text/javascript" src="/javascript/service/common.js"></script>
+<script type="text/javascript">
+	window.onload = function(){};
+	
+	function thisJoPrint(cseq){
+		showPopup('/lmxsrv/print/lawDetailPrintView.do?SEQ=20&SEQ_HISTORY=99999&SEQ_CONTENTS='+cseq, 'preview', 700, 304);
+	}
+	
+	function showImg(img , check){
+		if(check == 'on'){
+			$("#"+img+check).hide(); 
+			$("#"+img+"_"+check).hide();
+			$("#"+img+"off").show();
+			$("#"+img+"_off").show();
+			$("tr#"+img).show();
+		}else{
+			$("#"+img+check).hide();
+			$("#"+img+"_"+check).hide();
+			$("#"+img+"on").show();
+			$("#"+img+"_on").show();
+			$("tr#"+img).hide();			
+		}
+	}
+</script>
+</head>
+<body>
+	<div id="lawcontent">
+		
+
+		
+	</div>
+	<form id="linkFrom" name="linkFrom">
+		<input type="hidden" id="OC" name="OC" value='kdhcliss' /> <input
+			type="hidden" id="ID" name="ID" /> <input type="hidden" id="JO"
+			name="JO" />
+	</form>
+</body>
+</html>

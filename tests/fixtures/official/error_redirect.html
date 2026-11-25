@@ -1,0 +1,61 @@
+
+
+
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html>
+<head>
+
+
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<title>한성대학교 규정관리시스템</title>
+<link
+	href="/lmxsrv/jquery-ui-1.10.4/css/redmond/jquery-ui-1.10.4.custom.css"
+	rel="stylesheet" type="text/css" />
+<link href="/lmxsrv/css/lmxStyle.css" rel="stylesheet" type="text/css" />
+<link href="/lmxsrv/css/se2.css" rel="stylesheet" type="text/css" />
+<style>
+input {
+	ime-mode: active;
+}
+</style>
+
+<script type="text/javascript"
+	src="/lmxsrv/javascript/jquery-1.11.0.min.js"></script>
+<script type="text/javascript" src="/lmxsrv/javascript/lmxUtil.js"></script>
+<script type="text/javascript"
+	src="/lmxsrv/javascript/jquery.dotdotdot.min.js"></script>
+<script type="text/javascript"
+	src="/lmxsrv/jquery-ui-1.10.4/js/jquery-ui-1.10.4.custom.min.js"></script>
+
+<!-- <script type="text/javascript">
+	checkPort('mng'); //사용자단, 관리자단 포트 분리 필요시 사용
+</script> -->
+<div id="dialog-modal" title="처리 중..."
+	style="text-align: center; display: none;">
+	<p>처리 중 입니다. 잠시만 기다려 주십시오.</p>
+</div>
+<div id="dialog-frame" title="" style="display: none; padding: 0px;">
+	<iframe name="iframeDialog" id="iframeDialog" src="" width="0"
+		height="0" frameborder="0" style="display: none; border: 0;"></iframe>
+</div>
+</head>
+<body>
+	<form id="form" action="/errorPage.do" target="_top">
+		<input type="hidden" name="mode" id="mode" />
+	</form>
+	<script type="text/javascript">	
+	var url = document.URL;
+	
+	if( url.indexOf("lmxsrv") != -1 )
+		$("#mode").val("srv");
+	else if( url.indexOf("lmxemrs") != -1 )
+		$("#mode").val("emrs");
+	else
+		$("#mode").val("mng");
+
+	$("#form").submit();
+</script>
+</body>
+</html>
