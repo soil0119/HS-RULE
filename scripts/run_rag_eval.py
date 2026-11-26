@@ -45,6 +45,19 @@ def first_rank(article_ids, expected):
     return None
 
 
+def citation_matches(cited, expected, required=None) -> bool:
+    """인용 성공 판정(#59). 인용한 조항이 모두 허용 목록(expected) 안에 있고 하나 이상이어야 한다.
+
+    required가 있으면 그 조항을 모두 인용해야 한다. 여러 조항을 허용하는 사례는 expected에 대체 가능한 근거를,
+    required에 반드시 필요한 근거를 따로 적는다. 정답과 무관한 조항만 인용하면 실패다.
+    """
+    if not expected or not cited:
+        return False
+    if not set(cited) <= set(expected):
+        return False
+    return set(required or ()) <= set(cited)
+
+
 def retrieval_metrics(rows):
     """rows: [{rank: int|None}] → Recall@k, MRR. 대상이 없으면 None."""
     if not rows:
@@ -143,17 +156,81 @@ def conflict_evaluation(path: Path, retriever, llm) -> dict:
                  "candidate_recall": (len(expected & candidate_articles) / len(expected)) if expected else None}
         if analyzer is not None:
             started = time.perf_counter()
-            analysis = analyzer.analyze(case["document"], case["filename"], include_private=True,
-                                        language=case["language"])
-            flagged = {item["article"] for item in analysis["conflicts"]}
-            entry.update({"flagged": sorted(flagged), "expected_found": sorted(expected & flagged),
-                          "false_positives": sorted(flagged - expected) if expected or case["type"] != "conflict" else [],
-                          "recommendations_with_evidence": all(item.get("evidence") for item in analysis["recommendations"]),
-                          "scope": analysis["scope"], "seconds": round(time.perf_counter() - started, 3)})
+            try:
+                analysis = analyzer.analyze(case["document"], case["filename"], include_private=True,
+                                            language=case["language"])
+            except Exception as exc:  # 한 사례의 timeout·잘못된 JSON·예상 밖 오류가 다른 사례를 없애지 않는다(#58).
+                entry.update({"error": _case_error(exc), "seconds": round(time.perf_counter() - started, 3)})
+            else:
+                flagged = {item["article"] for item in analysis["conflicts"]}
+                entry.update({"flagged": sorted(flagged), "expected_found": sorted(expected & flagged),
+                              "false_positives": sorted(flagged - expected) if expected or case["type"] != "conflict" else [],
+                              "recommendations_with_evidence": all(item.get("evidence") for item in analysis["recommendations"]),
+                              "scope": analysis["scope"], "seconds": round(time.perf_counter() - started, 3)})
         results.append(entry)
     measured = [r["candidate_recall"] for r in results if r["candidate_recall"] is not None]
-    return {"cases": len(results), "candidate_recall_mean": (sum(measured) / len(measured)) if measured else None,
+    errors = sum(1 for r in results if r.get("error"))
+    return {"cases": len(results), "analyzed": (len(results) - errors) if analyzer is not None else 0,
+            "errors": errors, "candidate_recall_mean": (sum(measured) / len(measured)) if measured else None,
             "per_case": results}
+
+
+def _case_error(exc) -> dict:
+    """사례 오류 기록. provider 예외 본문은 원문·키가 섞일 수 있어 남기지 않고 계약 코드·예외 이름만 남긴다."""
+    from hsrule.answering import RagError
+
+    if isinstance(exc, RagError):
+        return {"code": exc.code, "reason": exc.reason}
+    return {"code": "unexpected_error", "reason": type(exc).__name__}
+
+
+def evaluate_answers(cases, answerer, regulations) -> dict:
+    """답변·인용 평가. 한 사례의 오류·지연을 기록하고 다음 사례를 계속 평가한다(#58)."""
+    known_revisions = {r["revision_id"] for r in regulations}
+    rows = []
+    for case in cases:
+        started = time.perf_counter()
+        try:
+            result = answerer.answer(case["question"], case.get("history"), language=case["language"])
+            error = None
+        except Exception as exc:  # RagError 외의 예상 밖 오류도 사례 오류로 남기고 다음 사례를 계속한다.
+            result, error = None, _case_error(exc)
+        seconds = time.perf_counter() - started
+        sources = (result or {}).get("sources", [])
+        cited = [s["article_id"] for s in sources]
+        expected = case.get("expected_articles")
+        rows.append({"id": case["id"], "type": case["type"], "error": error, "seconds": round(seconds, 3),
+                     "found": None if result is None else result["found"], "cited": cited,
+                     "cited_chunks": [s["chunk_id"] for s in sources],
+                     "citation_match": citation_matches(cited, expected, case.get("required_articles")),
+                     "expected_found": case.get("expected_found", bool(expected)),
+                     "url_ok": all(str(s.get("url", "")).startswith("http") for s in sources),
+                     "revision_match": all(s["revision_id"] in known_revisions for s in sources)})
+    return {"summary": summarize_answers(rows), "cases": rows}
+
+
+def summarize_answers(rows) -> dict:
+    """집계 분모를 명시한다. 오류 사례는 성공으로도 실패 답변으로도 세지 않고 errors로 따로 센다."""
+    completed = [r for r in rows if not r["error"]]
+    answerable = [r for r in rows if r["expected_found"]]
+    unanswerable = [r for r in rows if not r["expected_found"]]
+    answerable_done = [r for r in answerable if not r["error"]]
+    unanswerable_done = [r for r in unanswerable if not r["error"]]
+    found = [r for r in completed if r["found"]]
+    seconds = [r["seconds"] for r in rows]
+    return {
+        "cases": len(rows), "completed": len(completed), "errors": len(rows) - len(completed),
+        "error_reasons": sorted({f"{r['error']['code']}/{r['error']['reason']}" for r in rows if r["error"]}),
+        "denominators": {"answerable": len(answerable), "answerable_completed": len(answerable_done),
+                         "unanswerable": len(unanswerable), "unanswerable_completed": len(unanswerable_done)},
+        # 성공률은 오류 사례를 실패로 센다(분모는 전체). 무근거 답변률은 완료된 사례만 본다.
+        "citation_match_rate": (sum(r["citation_match"] for r in answerable) / len(answerable)) if answerable else None,
+        "revision_match_rate": (sum(r["revision_match"] for r in found) / len(found)) if found else None,
+        "unsupported_answer_rate": (sum(1 for r in unanswerable_done if r["found"]) / len(unanswerable_done))
+        if unanswerable_done else None,
+        "correct_refusal_rate": (sum(1 for r in unanswerable_done if r["found"] is False) / len(unanswerable))
+        if unanswerable else None,
+        "latency_seconds": {"p50": percentile(seconds, .5), "p95": percentile(seconds, .95)}}
 
 
 def load_regulations(args):
@@ -226,47 +303,24 @@ def main():
             rows["vector_only"].append({"rank": first_rank([h["article_id"] for h in vector], expected)})
 
     regressions = run_regressions(repository, embeddings, retriever, regulations)
-    conflicts = conflict_evaluation(Path(args.conflict_eval), retriever, llm)
+    stage_errors = []
+    try:
+        conflicts = conflict_evaluation(Path(args.conflict_eval), retriever, llm)
+    except Exception as exc:  # 예상하지 못한 오류도 이미 계산한 검색 결과 저장을 막지 않는다(#58).
+        stage_errors.append({"stage": "conflicts", "error": type(exc).__name__})
+        conflicts = {"cases": 0, "candidate_recall_mean": None, "errors": 1, "per_case": []}
 
     answers = None
     if llm is None:
         not_measured["answer_quality"] = "실제 LLM이 없는 standin 모드: 인용 일치·무근거 답변·거절은 측정하지 않음"
         not_measured["conflict_quality"] = "실제 LLM이 없는 standin 모드: 충돌 지적 정확도는 측정하지 않고 후보 재현율만 기록"
     else:
-        from hsrule.answering import CitedAnswerer, RagError
-        answerer = CitedAnswerer(llm, retriever, k=settings.retrieval_k)
-        answers, answer_latency = [], []
-        for case in cases:
-            started = time.perf_counter()
-            try:
-                result = answerer.answer(case["question"], case.get("history"), language=case["language"])
-                error = None
-            except RagError as exc:
-                result, error = None, exc.code
-            answer_latency.append(time.perf_counter() - started)
-            sources = (result or {}).get("sources", [])
-            cited = [s["article_id"] for s in sources]
-            expected = case.get("expected_articles")
-            known_revisions = {r["revision_id"] for r in regulations}
-            answers.append({"id": case["id"], "type": case["type"], "error": error,
-                            "found": None if result is None else result["found"], "cited": cited,
-                            "cited_chunks": [s["chunk_id"] for s in sources],
-                            "citation_match": bool(expected) and bool(cited) and set(cited) <= set(expected),
-                            "expected_found": case.get("expected_found", bool(expected)),
-                            "url_ok": all(str(s.get("url", "")).startswith("http") for s in sources),
-                            "revision_match": all(s["revision_id"] in known_revisions for s in sources)})
-        latencies_answer = {"p50": percentile(answer_latency, .5), "p95": percentile(answer_latency, .95)}
-        answerable = [a for a in answers if a["expected_found"]]
-        unanswerable = [a for a in answers if not a["expected_found"]]
-        summary = {
-            "cases": len(answers), "errors": sum(1 for a in answers if a["error"]),
-            "citation_match_rate": (sum(a["citation_match"] for a in answerable) / len(answerable)) if answerable else None,
-            "revision_match_rate": (sum(a["revision_match"] for a in answers if a["found"]) /
-                                    max(1, sum(1 for a in answers if a["found"]))),
-            "unsupported_answer_rate": (sum(1 for a in unanswerable if a["found"]) / len(unanswerable)) if unanswerable else None,
-            "correct_refusal_rate": (sum(1 for a in unanswerable if a["found"] is False) / len(unanswerable)) if unanswerable else None,
-            "latency_seconds": latencies_answer}
-        answers = {"summary": summary, "cases": answers}
+        from hsrule.answering import CitedAnswerer
+        try:
+            answers = evaluate_answers(cases, CitedAnswerer(llm, retriever, k=settings.retrieval_k), regulations)
+        except Exception as exc:
+            stage_errors.append({"stage": "answers", "error": type(exc).__name__})
+            not_measured["answer_quality"] = f"답변 평가 중 예상하지 못한 오류로 중단됨: {type(exc).__name__}"
 
     result = {
         "mode": args.mode,
@@ -290,7 +344,7 @@ def main():
                       "deleted_article_regressions": absent_failures,
                       "search_latency_seconds": {"p50": percentile(latencies, .5), "p95": percentile(latencies, .95)}},
         "answers": answers, "conflicts": conflicts, "regressions": regressions,
-        "retrieval_limits": retriever.limits, "not_measured": not_measured,
+        "retrieval_limits": retriever.limits, "not_measured": not_measured, "errors": stage_errors,
     }
     Path(args.out).mkdir(parents=True, exist_ok=True)
     path = Path(args.out) / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{args.mode}.json"

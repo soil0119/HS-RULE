@@ -2,7 +2,7 @@
 {"id": "exact-3-2", "type": "exact_article", "language": "ko", "question": "제3조의2 계약학과는 무엇인가요?", "expected_articles": ["제3조의2"]}
 {"id": "keyword-early-grad", "type": "keyword", "language": "ko", "question": "조기졸업은 몇 학기 만에 할 수 있나요?", "expected_articles": ["제40조"]}
 {"id": "short-early-grad", "type": "short_query", "language": "ko", "question": "조기졸업", "expected_articles": ["제40조"]}
-{"id": "short-credit", "type": "short_query", "language": "ko", "question": "졸업학점", "expected_articles": ["제33조", "제34조", "제32조"]}
+{"id": "short-credit", "type": "short_query", "language": "ko", "question": "졸업학점", "expected_articles": ["제34조"]}
 {"id": "wrong-name-early-grad", "type": "wrong_regulation_name", "language": "ko", "question": "한성대 학사운영규정에 조기졸업 요건이 어떻게 되어 있나요?", "expected_articles": ["제40조"]}
 {"id": "wrong-name-grade", "type": "wrong_regulation_name", "language": "ko", "question": "성적처리지침에서 A+ 기준이 뭔가요?", "expected_articles": ["제32조"]}
 {"id": "synonym-grade-point", "type": "synonym", "language": "ko", "question": "과목 성적이 몇 점이면 평점이 3.5인가요?", "expected_articles": ["제32조"]}
