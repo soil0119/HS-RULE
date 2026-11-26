@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!playground.py
+!static/
+!static/**

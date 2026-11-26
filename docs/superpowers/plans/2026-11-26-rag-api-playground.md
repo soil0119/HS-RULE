@@ -31,9 +31,9 @@
 
 **Interfaces:** `/api/config`, `/api/health`, `POST /api/query` → `{status, elapsed_ms, request_id, body}`.
 
-- [ ] 임시 upstream으로 실제 전달/오류/출처·경로 경계 테스트를 작성하고 실패 확인.
-- [ ] 고정 대상·응답 제한·timeout·리다이렉트 차단을 구현하고 unittest 통과.
-- [ ] gateway와 테스트를 커밋.
+- [x] 임시 upstream으로 실제 전달/오류/출처·경로 경계 테스트를 작성하고 실패 확인.
+- [x] 고정 대상·응답 제한·timeout·리다이렉트 차단을 구현하고 unittest 통과.
+- [x] gateway와 테스트를 커밋.
 
 ### Task 2: 웹 화면·Docker·사용법
 
@@ -41,7 +41,9 @@
 
 **Interfaces:** Task 1 API envelope를 사용해 실제 상태·답변·근거·JSON을 표시.
 
-- [ ] 질문·ko/en·대화 이력·새 대화·연결 확인·JSON 다운로드를 구현.
-- [ ] 별도 Compose로 비관리자·read-only 컨테이너를 빌드/실행.
-- [ ] unittest, JS 구문 검사, Docker health, 브라우저 정상/실패/모바일 화면 확인.
-- [ ] 실모델 미연결 한계와 담당 이슈를 문서화하고 최종 리뷰 후 커밋·PR 게시.
+- [x] 질문·ko/en·대화 이력·새 대화·연결 확인·JSON 다운로드를 구현.
+- [x] 별도 Compose로 비관리자·read-only 컨테이너를 빌드/실행.
+- [x] unittest, JS 구문 검사, Docker health, 브라우저 정상/실패/모바일 화면 확인.
+- [x] 실모델 미연결 한계와 담당 이슈를 문서화하고 최종 리뷰 후 커밋·PR 게시.
+
+Execution: aa3f5fe gateway 커밋 후 웹 화면·Docker·사용법 구현. API prefix 링크 결함은 별도 리뷰에서 재현 후 수정하고 회귀 테스트를 추가했다. 실모델 연결은 #76/#20/#66 후속 의존성으로 유지한다.
