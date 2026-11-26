@@ -9,6 +9,14 @@ from .pages import PageError, normalize_space, service_soup
 _ZNODES = re.compile(r"var\s+zNodes\s*=\s*(\[.*?\])\s*;\s*\n", re.S)
 _CODE_TITLE = re.compile(r"^(\d+(?:-[0-9A-Za-z]+)+)\s+(.+)$")
 _SHOW_DATE = re.compile(r"showDate\(\s*'(\d{8})'")
+_FUTURE_DATE = re.compile(r"chekFutureDate\(\s*'(\d{8})'")
+
+
+def _yyyymmdd(raw: str) -> date:
+    try:
+        return date(int(raw[:4]), int(raw[4:6]), int(raw[6:]))
+    except ValueError:
+        raise PageError("detail_invalid", f"날짜 형식 오류: {raw}") from None
 _FORMER_NAMES = re.compile(r"^(.*?)\s*\(\s*舊\s*([^)]*)\)\s*$")  # '학사운영규정(舊 학사운영내규)'
 _ABOLISHED = re.compile(r"\s*\[\s*폐지\s*\]\s*")  # 목록은 '… [폐지]', 상세는 '[폐지] 3-1-83 …'
 
@@ -30,8 +38,9 @@ class CatalogEntry:
 @dataclass(frozen=True)
 class Revision:
     history: int
-    effective: date
+    effective: date  # 시행일: 상세의 chekFutureDate 인자. 사이트는 오늘이 이 날 전이면 [시행예정]을 붙인다.
     kind: str  # 사이트 표기(제정·개정·전부개정 등)
+    promulgated: date | None = None  # 공포일: 상세 목록에 표시되는 showDate 인자
 
 
 def split_abolished(name: str) -> tuple[str, bool]:
@@ -109,7 +118,12 @@ def parse_catalog(html: str) -> tuple[list[CatalogEntry], list[dict]]:
 
 
 def parse_detail(html: str) -> dict:
-    """규정 상세에서 코드·제목·담당부서와 개정 목록(시행일 포함)을 읽는다."""
+    """규정 상세에서 코드·제목·담당부서와 개정 목록(공포일·시행일)을 읽는다.
+
+    개정 항목마다 showDate(목록에 보이는 날짜)와 chekFutureDate(오늘이 그 전이면 [시행예정] 표시)가 있다.
+    실제 본문 부칙으로 확인한 결과 앞은 공포일, 뒤는 시행일이다(학칙 1453: 2025-08-28 공포,
+    "2025년 9월 1일부터 시행"). 시행 중 개정은 시행일로 고른다.
+    """
     soup = service_soup(html)
     select = soup.select_one("select#histroySeq")  # 사이트 원문 철자(histroy)를 그대로 쓴다.
     if select is None:
@@ -117,17 +131,14 @@ def parse_detail(html: str) -> dict:
     revisions = []
     for option in select.find_all("option"):
         value = option.get("value", "")
-        date_match = _SHOW_DATE.search(str(option))
-        if not value.isdigit() or not date_match:
+        shown, future = _SHOW_DATE.search(str(option)), _FUTURE_DATE.search(str(option))
+        if not value.isdigit() or not shown or not future:
+            # 시행일을 알 수 없는 개정은 시행 여부를 판단할 수 없으므로 상세 전체를 거부한다.
             raise PageError("detail_invalid", f"개정 항목을 해석할 수 없습니다: {normalize_space(option.get_text())!r}")
         for script in option.find_all("script"):
             script.decompose()
-        raw = date_match.group(1)
-        try:
-            effective = date(int(raw[:4]), int(raw[4:6]), int(raw[6:]))
-        except ValueError:
-            raise PageError("detail_invalid", f"시행일 형식 오류: {raw}") from None
-        revisions.append(Revision(int(value), effective, split_abolished(option.get_text(" "))[0]))
+        revisions.append(Revision(int(value), _yyyymmdd(future.group(1)),
+                                  split_abolished(option.get_text(" "))[0], _yyyymmdd(shown.group(1))))
     if not revisions:
         raise PageError("detail_invalid", "개정 이력이 비어 있습니다")
     stit = soup.select_one(".Stit")
@@ -136,8 +147,10 @@ def parse_detail(html: str) -> dict:
     code, title = split_code_title(unmarked)
     department = normalize_space(dtit.get_text(" ")) if dtit else ""
     department = re.sub(r"^담당부서\s*:\s*", "", department)
+    # 제목 옆 [시행예정] 표시용 날짜. 최신 개정(폐지 규정은 폐지 기록)의 시행일과 같다.
+    status = _FUTURE_DATE.search(str(stit)) if stit else None
     return {"code": code, "title": title, "department": department, "abolished": abolished,
-            "revisions": revisions}
+            "revisions": revisions, "status_date": _yyyymmdd(status.group(1)) if status else None}
 
 
 def select_revision(revisions: list[Revision], today: date) -> tuple[Revision, list[Revision]]:

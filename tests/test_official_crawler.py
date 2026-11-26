@@ -76,9 +76,34 @@ class CatalogTests(unittest.TestCase):
     def test_detail_revisions_and_metadata(self):
         detail = parse_detail(fixture("detail_20.html"))
         self.assertEqual((detail["code"], detail["title"], detail["department"]), ("2-1-1", "한성대학교 학칙", "공통"))
-        self.assertEqual(detail["revisions"], [Revision(1717, date(2026, 11, 11), "개정"),
-                                               Revision(1647, date(2026, 4, 21), "개정"),
-                                               Revision(1623, date(2026, 2, 26), "개정")])
+        self.assertEqual(detail["revisions"], [Revision(1717, date(2026, 11, 11), "개정", date(2026, 11, 11)),
+                                               Revision(1647, date(2026, 4, 21), "개정", date(2026, 4, 21)),
+                                               Revision(1623, date(2026, 2, 26), "개정", date(2026, 2, 26))])
+        self.assertEqual(detail["status_date"], date(2026, 11, 11))
+
+    def test_effective_date_is_chek_future_date_not_the_shown_date(self):
+        # 실제 학칙 상세: 1453은 목록에 2025-08-28(showDate)로 보이지만 chekFutureDate는 2025-09-01이다.
+        # 같은 개정 본문의 마지막 부칙이 "(2025. 8. 28. 공포) … 2025년 9월 1일부터 시행"이므로
+        # showDate는 공포일, chekFutureDate는 시행일이다.
+        revision = next(r for r in parse_detail(fixture("detail_20_dates.html"))["revisions"] if r.history == 1453)
+        self.assertEqual((revision.promulgated, revision.effective), (date(2025, 8, 28), date(2025, 9, 1)))
+        evidence = parse_content(fixture("content_20_1453.html"), "한성대학교 학칙")["text"]
+        self.assertIn("부 칙 (2025. 8. 28. 공포)", evidence)
+        self.assertIn("2025년 9월 1일부터 시행한다", evidence)
+
+        revisions = parse_detail(fixture("detail_20_dates.html"))["revisions"]
+        for today, expected in ((date(2025, 8, 28), 1410), (date(2025, 8, 31), 1410), (date(2025, 9, 1), 1453)):
+            with self.subTest(today=today):
+                current, upcoming = select_revision(revisions, today)
+                self.assertEqual(current.history, expected)
+                self.assertEqual(1453 in [r.history for r in upcoming], expected != 1453)
+
+    def test_detail_without_an_effective_date_is_rejected(self):
+        # 합성: 시행일(chekFutureDate)이 없는 개정 항목은 시행 여부를 알 수 없다.
+        html = fixture("detail_20.html").replace("chekFutureDate('20260421')", "noDate()", 1)
+        with self.assertRaises(PageError) as caught:
+            parse_detail(html)
+        self.assertEqual(caught.exception.reason, "detail_invalid")
 
     def test_current_revision_excludes_future_effective_dates(self):
         revisions = parse_detail(fixture("detail_20.html"))["revisions"]
@@ -498,7 +523,8 @@ class BuildRegulationTests(unittest.TestCase):
         self.assertEqual(item["official_url"],
                          "https://rule.hansung.ac.kr/lmxsrv/law/lawFullView.do?SEQ=20&SEQ_HISTORY=1717")
         self.assertEqual((item["code"], item["department"], item["visibility"]), ("2-1-1", "공통", "public"))
-        self.assertEqual(item["revision"], {"history": 1717, "effective_date": "2026-11-11", "kind": "개정"})
+        self.assertEqual(item["revision"], {"history": 1717, "effective_date": "2026-11-11",
+                                            "promulgation_date": "2026-11-11", "kind": "개정"})
         self.assertEqual(len(item["content_hash"]), 64)
         self.assertEqual(item["fetched_at"], "2026-11-25T05:00:00+00:00")
         json.dumps(item, ensure_ascii=False)  # 스냅샷 JSON으로 그대로 직렬화된다.
@@ -509,7 +535,8 @@ class BuildRegulationTests(unittest.TestCase):
         item = build_regulation(stub, self.ENTRY, date(2026, 11, 10), now=self.NOW)
         self.assertEqual(stub.requested[-1], ("content", 20, 1647))
         self.assertEqual(item["revision_id"], "20:1647")
-        self.assertEqual(item["upcoming"], [{"history": 1717, "effective_date": "2026-11-11", "kind": "개정"}])
+        self.assertEqual(item["upcoming"], [{"history": 1717, "effective_date": "2026-11-11",
+                                             "promulgation_date": "2026-11-11", "kind": "개정"}])
         self.assertNotIn("2026. 11. 11. 공포", item["text"])
         self.assertEqual([a["label"] for a in item["articles"] if a["kind"] == "addendum"],
                          ["부칙#1", "부칙(2026.4.21.공포)"])
@@ -548,7 +575,76 @@ class BuildRegulationTests(unittest.TestCase):
         self.assertEqual(stub.requested, [("detail", 197)])
         self.assertEqual((item["regulation_id"], item["revision_id"], item["abolished"], item["text"]),
                          ("197", "197:928", True, ""))
-        self.assertEqual(item["revision"], {"history": 928, "effective_date": "2021-10-21", "kind": "개정"})
+        # 실제 197: 폐지 기록 928은 2021-10-21 공포, 2021-08-23 시행(소급). 시행일이 효력일이다.
+        self.assertEqual(item["revision"], {"history": 928, "effective_date": "2021-08-23",
+                                            "promulgation_date": "2021-10-21", "kind": "개정"})
+
+    ABOLISHED = CatalogEntry(197, "3-1-83", "창업R&D센터 규정", 928, ("제3편 학사행정", "제1장 일반행정"), (), True)
+
+    def build_abolished(self, detail, today, content=None):
+        stub = StubClient(detail, content or fixture("content_197_310.html"))
+        return build_regulation(stub, self.ABOLISHED, today, now=self.NOW), stub
+
+    def test_abolition_takes_effect_on_its_effective_date(self):
+        detail = fixture("detail_197_abolished.html")
+        before, stub = self.build_abolished(detail, date(2021, 8, 22))
+        self.assertEqual((before["abolished"], before["revision_id"]), (False, "197:310"))
+        self.assertEqual(stub.requested, [("detail", 197), ("content", 197, 310)])
+        self.assertIn("창업R&D센터", before["text"])
+        self.assertEqual(before["scheduled_abolition"]["effective_date"], "2021-08-23")
+        self.assertEqual([r["history"] for r in before["upcoming"]], [928])
+        for today in (date(2021, 8, 23), date(2021, 10, 21), date(2026, 11, 25)):
+            with self.subTest(today=today):
+                item, stub = self.build_abolished(detail, today)
+                self.assertEqual((item["abolished"], item["revision_id"], item["text"]), (True, "197:928", ""))
+                self.assertEqual(stub.requested, [("detail", 197)])
+
+    def test_future_abolition_keeps_the_regulation_indexed(self):
+        # 합성(리뷰 #62 재현): 폐지 기록의 날짜를 2026-12-01로 옮긴다. 11/25에는 310이 시행 중이다.
+        detail = (fixture("detail_197_abolished.html").replace("'20210823'", "'20261201'")
+                  .replace("'20211021'", "'20261201'"))
+        self.assertNotEqual(detail, fixture("detail_197_abolished.html"))
+        item, _ = self.build_abolished(detail, date(2026, 11, 25))
+        self.assertEqual((item["abolished"], item["revision_id"]), (False, "197:310"))
+        self.assertEqual(item["scheduled_abolition"]["history"], 928)
+        self.assertTrue(item["text"])
+        on_day, _ = self.build_abolished(detail, date(2026, 12, 1))
+        self.assertTrue(on_day["abolished"])
+
+    def test_future_amendment_and_abolition_mixed(self):
+        # 합성: 310(과거) → 900 개정(2026-12-01 시행) → 928 폐지(2027-03-01 시행)
+        detail = fixture("detail_197_abolished.html").replace("'20210823'", "'20270301'").replace(
+            "'20211021'", "'20261215'")
+        amendment = ('<option value="900"><script type="text/javascript">showDate(\'20261110\', \'2\');</script>개정'
+                     '<script type="text/javascript">if(chekFutureDate(\'20261201\')){document.write("[시행예정]");}'
+                     '</script>[폐지]</option>')
+        detail = detail.replace('<option value="310">', amendment + '<option value="310">', 1)
+        self.assertIn('value="900"', detail)
+        cases = {
+            date(2026, 11, 25): (False, "197:310", [900, 928]),
+            date(2026, 12, 1): (False, "197:900", [928]),
+            date(2027, 2, 28): (False, "197:900", [928]),
+            date(2027, 3, 1): (True, "197:928", None),
+        }
+        for today, (abolished, revision_id, upcoming) in cases.items():
+            with self.subTest(today=today):
+                content = fixture("content_197_310.html")
+                if revision_id == "197:900":
+                    content = content.replace("SEQ_HISTORY=310", "SEQ_HISTORY=900")
+                item, _ = self.build_abolished(detail, today, content)
+                self.assertEqual((item["abolished"], item["revision_id"]), (abolished, revision_id))
+                if upcoming is not None:
+                    self.assertEqual([r["history"] for r in item["upcoming"]], upcoming)
+                    self.assertEqual(item["scheduled_abolition"]["effective_date"], "2027-03-01")
+
+    def test_title_status_date_must_match_the_latest_revision(self):
+        # 합성: 제목 옆 [시행예정] 날짜와 최신 개정 시행일이 다르면 상세를 믿지 않는다.
+        detail = fixture("detail_197_abolished.html")
+        changed = detail[::-1].replace("'32801202'", "'10901202'", 1)[::-1]  # 마지막(제목 옆) 날짜만 바꾼다
+        self.assertNotEqual(changed, detail)
+        with self.assertRaises(PageError) as caught:
+            self.build_abolished(changed, date(2026, 11, 25))
+        self.assertEqual(caught.exception.reason, "detail_invalid")
 
     def test_catalog_and_detail_must_agree(self):
         mismatched = [

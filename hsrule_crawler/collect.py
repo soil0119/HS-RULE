@@ -37,8 +37,9 @@ def check_revision_identity(html: str, articles: list[dict], seq: int, revision)
     """요청한 개정의 본문인지 확인한다. 식별 불가·불일치는 색인하지 않고 거부한다.
 
     1. 링크의 (SEQ, SEQ_HISTORY)가 모두 요청과 같아야 한다. 링크가 하나도 없으면 revision_unidentified.
-    2. 본문 부칙의 공포일이 선택한 개정 날짜보다 늦으면 뒤 개정의 본문이다(공포일은 자기 개정 날짜보다
-       늦을 수 없다). 날짜를 읽을 수 없는 부칙은 이 검사에서 뺀다.
+    2. 본문 부칙의 공포일이 선택한 개정의 공포일보다 늦으면 뒤 개정의 본문이다(부칙은 자기 개정과 함께
+       공포된다). 시행일과 비교하지 않는다: 소급 시행(시행일이 공포일보다 이른 개정)이 실제로 있다.
+       날짜를 읽을 수 없는 부칙은 이 검사에서 뺀다.
     """
     found = response_revisions(html)
     if not found:
@@ -54,13 +55,16 @@ def check_revision_identity(html: str, articles: list[dict], seq: int, revision)
             promulgated = date(*map(int, match.groups()))
         except ValueError:
             continue
-        if promulgated > revision.effective:
+        limit = revision.promulgated or revision.effective
+        if promulgated > limit:
             raise PageError("revision_mismatch",
-                            f"{revision.effective} 개정 본문에 그 뒤 공포된 부칙이 있습니다: {item['heading']}")
+                            f"{limit} 공포 개정 본문에 그 뒤 공포된 부칙이 있습니다: {item['heading']}")
 
 
 def _revision(revision) -> dict:
-    return {"history": revision.history, "effective_date": revision.effective.isoformat(), "kind": revision.kind}
+    promulgated = revision.promulgated.isoformat() if revision.promulgated else None
+    return {"history": revision.history, "effective_date": revision.effective.isoformat(),
+            "promulgation_date": promulgated, "kind": revision.kind}
 
 
 def build_regulation(client: OfficialClient, entry: CatalogEntry, today: date, now=None) -> dict:
@@ -73,51 +77,50 @@ def build_regulation(client: OfficialClient, entry: CatalogEntry, today: date, n
         raise PageError("revision_mismatch", f"목록의 최신 개정 {entry.latest_history}가 상세 개정 목록에 없습니다")
     if detail["abolished"] != entry.abolished:
         raise PageError("status_mismatch", f"폐지 표기 불일치: 목록 {entry.abolished}, 상세 {detail['abolished']}")
-    if entry.abolished:
-        # 폐지 규정은 본문을 받지 않는다. 색인기는 abolished 항목을 받으면 해당 규정을 색인에서 지운다.
-        latest = next(revision for revision in detail["revisions"] if revision.history == entry.latest_history)
-        return {
-            "regulation_id": str(entry.seq),
+    latest = next(revision for revision in detail["revisions"] if revision.history == entry.latest_history)
+    if detail["status_date"] is not None and detail["status_date"] != latest.effective:
+        raise PageError("detail_invalid", f"제목 옆 시행일 {detail['status_date']}이 최신 개정 시행일 {latest.effective}와 다릅니다")
+    meta = {
+        "regulation_id": str(entry.seq),
+        "title": entry.title,  # 목록 명칭(옛 명칭 제외). 본문 표기는 text 첫 줄에 그대로 있다.
+        "visibility": "public",
+        "former_names": list(entry.former_names),
+        "code": entry.code or detail["code"],
+        "department": detail["department"],
+        "path": list(entry.path),
+        "latest_history": entry.latest_history,
+        "fetched_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
+    }
+    # 폐지 규정의 [폐지]는 모든 개정 항목에 함께 붙는 규정 상태이고, 폐지 기록은 최신 개정이다(본문은 직전과 같다).
+    # 폐지는 그 시행일부터 효력이 있다. 그 전에는 직전 개정이 시행 중이므로 평소처럼 색인하고 폐지를 예정으로 남긴다.
+    if entry.abolished and latest.effective <= today:
+        # 색인기는 abolished 항목을 받으면 해당 규정을 색인에서 지우므로, 시행일이 지난 뒤에만 낸다.
+        return meta | {
             "revision_id": f"{entry.seq}:{latest.history}",
-            "title": entry.title,
             "official_url": official_url(entry.seq, latest.history),
             "text": "",
             "abolished": True,
-            "visibility": "public",
-            "former_names": list(entry.former_names),
-            "code": entry.code or detail["code"],
-            "department": detail["department"],
-            "path": list(entry.path),
             "revision": _revision(latest),
-            "latest_history": entry.latest_history,
-            "fetched_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         }
     current, upcoming = select_revision(detail["revisions"], today)
     html = client.content_html(entry.seq, current.history)
     parsed = parse_content(html, entry.title)
     check_revision_identity(html, parsed["articles"], entry.seq, current)
     text = parsed["text"]
-    return {
-        "regulation_id": str(entry.seq),
+    return meta | {
         "revision_id": f"{entry.seq}:{current.history}",
-        "title": entry.title,  # 목록 명칭(옛 명칭 제외). 본문 표기는 text 첫 줄에 그대로 있다.
         "official_url": official_url(entry.seq, current.history),
         "text": text,
         "abolished": False,
-        "visibility": "public",
-        "former_names": list(entry.former_names),
         "history_notes": parsed["history_notes"],
-        "code": entry.code or detail["code"],
-        "department": detail["department"],
-        "path": list(entry.path),
         "revision": _revision(current),
-        "latest_history": entry.latest_history,
         "upcoming": [_revision(revision) for revision in upcoming],
+        # 시행 전 폐지: 효력일이 지나면 같은 수집기가 abolished 항목을 낸다.
+        "scheduled_abolition": _revision(latest) if entry.abolished else None,
         "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "articles": parsed["articles"],
         "attachments": parsed["attachments"],
         "warnings": parsed["warnings"],
-        "fetched_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
     }
 
 
