@@ -17,15 +17,16 @@
 
 | 사유 코드 | 조건 |
 |---|---|
-| `error_page` | `errorPage.do` 리다이렉트 폼이 있거나 최종 URL이 오류 페이지 |
+| `error_page` | `errorPage.do` 리다이렉트 폼이 있거나, 리다이렉트 목적지가 오류 페이지(요청하지 않음) |
 | `login_page` | 비밀번호 입력이 있는 화면 |
 | `not_content` / `empty_content` / `shell` | 본문 영역 없음 / 규정명 없음 / 조문·부칙이 하나도 없음 |
 | `title_mismatch` | 목록·상세·본문의 규정명이 다름(공백·`舊`·`[폐지]` 표기는 무시) |
 | `revision_mismatch` / `status_mismatch` | 목록의 최신 개정이 상세에 없음 / 폐지 표기가 목록과 상세에서 다름 |
 | `no_effective_revision` | 오늘 기준 시행 중인 개정이 없음 |
-| `foreign_redirect` | `https://rule.hansung.ac.kr`가 아닌 곳으로 이동 |
+| `foreign_redirect` | 리다이렉트 목적지가 `https://rule.hansung.ac.kr`(기본 포트, 사용자 정보 없음)가 아님. **목적지를 요청하기 전에** 거부한다 |
+| `redirect_loop` / `bad_redirect` | 같은 주소로 되돌아오거나 3회를 넘는 리다이렉트 / `Location` 없는 3xx |
 
-네트워크 오류와 200이 아닌 응답은 `FetchError`다. 재시도와 실패 집계는 #17이 맡는다.
+리다이렉트는 자동으로 따르지 않는다(`allow_redirects=False`). 각 `Location`을 검사한 뒤 같은 호스트일 때만 요청 간격을 지켜 최대 3회 따른다. TLS 인증서 검증은 requests 기본값을 그대로 쓴다. 네트워크 오류와 200이 아닌 응답은 `FetchError`다. 재시도와 실패 집계는 #17이 맡는다.
 
 ## 출력 계약 (스냅샷 항목)
 

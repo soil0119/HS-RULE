@@ -205,8 +205,29 @@ class ContentParserTests(unittest.TestCase):
 
 
 class FakeResponse:
-    def __init__(self, url, text="", status=200):
+    def __init__(self, url, text="", status=200, headers=None):
         self.url, self.text, self.status_code, self.encoding = url, text, status, "utf-8"
+        self.headers = headers or {}
+
+
+class RecordingAdapter(requests.adapters.BaseAdapter):
+    """네트워크 없는 transport. 실제로 전송된 URL을 모두 기록한다."""
+
+    def __init__(self, routes):
+        super().__init__()
+        self.routes, self.sent = routes, []
+
+    def send(self, request, **kwargs):
+        self.sent.append((request.url, kwargs.get("verify")))
+        status, headers, body = self.routes[request.url]
+        response = requests.Response()
+        response.status_code, response.url, response.request = status, request.url, request
+        response.headers.update(headers)
+        response._content, response.encoding = body.encode("utf-8"), "utf-8"
+        return response
+
+    def close(self):
+        pass
 
 
 class FakeSession:
@@ -240,6 +261,7 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("cookies", kwargs)
         self.assertEqual(len(session.cookies), 0)
         self.assertEqual(kwargs["timeout"], (5, 20))
+        self.assertIs(kwargs["allow_redirects"], False)
 
     def test_requests_are_spaced(self):
         ok = "https://rule.hansung.ac.kr/lmxsrv/law/x"
@@ -265,6 +287,66 @@ class ClientTests(unittest.TestCase):
                 client.get("x", {})
             if reason:
                 self.assertEqual(caught.exception.reason, reason)
+
+    def transport(self, routes):
+        session = requests.Session()
+        adapter = RecordingAdapter(routes)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        self.slept = []
+        return OfficialClient(session, min_interval=1.0, sleep=self.slept.append), adapter
+
+    def test_redirect_targets_are_checked_before_they_are_requested(self):
+        start = "https://rule.hansung.ac.kr/lmxsrv/law/x"
+        forbidden = {
+            "foreign host": ("https://foreign.example/lmxsrv/law/x", "foreign_redirect"),
+            "plain http": ("http://rule.hansung.ac.kr/lmxsrv/law/x", "foreign_redirect"),
+            "other port": ("https://rule.hansung.ac.kr:8443/lmxsrv/law/x", "foreign_redirect"),
+            "userinfo": ("https://user@rule.hansung.ac.kr/lmxsrv/law/x", "foreign_redirect"),
+            "look-alike host": ("https://rule.hansung.ac.kr.evil.example/x", "foreign_redirect"),
+            "error page": ("https://rule.hansung.ac.kr/errorPage.do", "error_page"),
+        }
+        for name, (target, reason) in forbidden.items():
+            with self.subTest(name):
+                client, adapter = self.transport({
+                    start: (302, {"Location": target}, ""),
+                    target: (200, {}, "must never be sent"),
+                })
+                with self.assertRaises(PageError) as caught:
+                    client.get("x", {})
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual([url for url, _ in adapter.sent], [start])
+
+    def test_loops_missing_location_and_too_many_hops_are_refused(self):
+        base = "https://rule.hansung.ac.kr/lmxsrv/law/"
+        cases = {
+            "loop": ({base + "x": (302, {"Location": "y"}, ""), base + "y": (301, {"Location": "x"}, "")},
+                     "redirect_loop", [base + "x", base + "y"]),
+            "self": ({base + "x": (307, {"Location": base + "x"}, "")}, "redirect_loop", [base + "x"]),
+            "no location": ({base + "x": (302, {}, "")}, "bad_redirect", [base + "x"]),
+            "too many": ({base + "x": (302, {"Location": "a"}, ""), base + "a": (302, {"Location": "b"}, ""),
+                          base + "b": (302, {"Location": "c"}, ""), base + "c": (302, {"Location": "d"}, ""),
+                          base + "d": (200, {}, "too far")},
+                         "redirect_loop", [base + "x", base + "a", base + "b", base + "c"]),
+        }
+        for name, (routes, reason, sent) in cases.items():
+            with self.subTest(name):
+                client, adapter = self.transport(routes)
+                with self.assertRaises(PageError) as caught:
+                    client.get("x", {})
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual([url for url, _ in adapter.sent], sent)
+
+    def test_same_host_redirect_is_followed_with_tls_verification_and_spacing(self):
+        start = "https://rule.hansung.ac.kr/lmxsrv/law/lawDetail.do?SEQ=20"
+        moved = "https://rule.hansung.ac.kr/lmxsrv/law/lawDetail2.do?SEQ=20"
+        client, adapter = self.transport({
+            start: (302, {"Location": "/lmxsrv/law/lawDetail2.do?SEQ=20"}, ""),
+            moved: (200, {}, "본문"),
+        })
+        self.assertEqual(client.get("lawDetail.do", {"SEQ": 20}), "본문")
+        self.assertEqual(adapter.sent, [(start, True), (moved, True)])
+        self.assertEqual(len(self.slept), 1)  # 리다이렉트 요청도 요청 간격을 지킨다
 
 
 class StubClient:
