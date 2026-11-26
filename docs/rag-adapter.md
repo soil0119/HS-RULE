@@ -8,7 +8,7 @@
 | `hsrule/migrations/`, `migrations.py`, `official_repository.py` | 비파괴 migration, pgvector 스키마(부분 hnsw·trigram 인덱스), 개정 단위 원자 저장 (#24) |
 | `hsrule/official_indexer.py` | 배치 임베딩 색인, 개정·삭제 재색인, 스냅샷 동기화 (#25) |
 | `hsrule/official_retrieval.py` | 조항 번호 + 한국어 키워드 + 벡터 RRF 결합 검색, 권한·개정 필터 (#26) |
-| `hsrule/chains.py`, `rag_config.py` | LangChain Retriever·Runnable·대화 이력·한영 체인, Groq 모델 설정 (#27) |
+| `hsrule/chains.py`, `rag_config.py` | LangChain Retriever·Runnable·대화 이력·한영 체인, LLM(Gemini·Groq) 모델 설정 (#27) |
 | `hsrule/answering.py` | JSON 구조화 출력, 후보 라벨 기반 조항 인용, 오류 계약 (#28) |
 | `hsrule/conflict.py` | 교직원 문서 충돌 분석, 처리 범위·근거 표시 (#29) |
 | `hsrule/adapter.py` | `RagBackend`(`answer`, `analyze_conflict`) 구현과 `create_regulation_adapter` |
@@ -20,7 +20,8 @@ docker compose up -d db
 export DATABASE_URL=postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/hansungrules
 python -m hsrule.official_repository --init      # migration 적용 (비파괴)
 python -m hsrule.official_indexer snapshot.json   # {"regulations":[{regulation_id, revision_id, title, official_url, text}]}
-export GROQ_API_KEY=... GROQ_MODEL=<현재 지원 모델>   # 기본값 없음, 종료된 Scout 거부
+export GEMINI_API_KEY=... GEMINI_MODEL=<현재 지원 모델>   # 기본 제공자 gemini, 모델 기본값 없음
+# Groq를 쓰려면: export LLM_PROVIDER=groq GROQ_API_KEY=... GROQ_MODEL=<현재 지원 모델>  (종료된 Scout 거부)
 ```
 
 ```python

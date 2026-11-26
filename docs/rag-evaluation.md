@@ -18,7 +18,7 @@
 | PostgreSQL 16 + pgvector 스키마·색인·검색·권한/개정/삭제 필터 | 실제 PostgreSQL에서 테스트 통과(`HSRULE_TEST_DATABASE_URL`) |
 | 청킹 전문 보존(누락·잘림·한도 초과) | 실제 학칙 발췌 fixture로 통과. 전체 규정 스냅샷은 미검증 |
 | 임베딩 | 테스트·`standin`은 문자 2-gram 해시 대역. 실제 `paraphrase-multilingual-MiniLM-L12-v2` 미검증(이 환경에서 모델 다운로드 불가) |
-| 답변·인용·충돌 분석 | 대역 모델로 계약·검증 로직만 테스트. 실제 Groq 호출 미검증(`GROQ_API_KEY`·`GROQ_MODEL` 필요) |
+| 답변·인용·충돌 분석 | 대역 모델로 계약·검증 로직만 테스트. 실제 LLM 호출 미검증(`GEMINI_API_KEY`·`GEMINI_MODEL` 또는 `GROQ_*` 필요) |
 | 임베딩 모델 사전검증(길이·차원·한국어 구분) | 규칙은 대역으로 검증. 실제 모델에 대한 실행은 `real` 모드 첫 색인에서 이뤄지며 아직 미실행 |
 | `standin` 평가 결과 | 파이프라인 점검용이며 모델 품질 주장이 아님 |
 | 공식 크롤링 스냅샷(#16/#17), 일반 DB(#18) | 미연결. 입력 형식은 `{regulation_id, revision_id, title, official_url, text}`로 가정 |
@@ -30,7 +30,7 @@ PDF 초안 PR#2의 합성 입력 테스트는 이 평가의 완료 근거가 아
 ```sh
 docker compose up -d db
 export DATABASE_URL=postgresql://postgres:$POSTGRES_PASSWORD@127.0.0.1:5432/hansungrules
-export GROQ_API_KEY=... GROQ_MODEL=<현재 지원 모델>
+export GEMINI_API_KEY=... GEMINI_MODEL=<현재 지원 모델>   # Groq는 LLM_PROVIDER=groq GROQ_API_KEY GROQ_MODEL
 python scripts/run_rag_eval.py --mode real --snapshot snapshot.json
 ```
 

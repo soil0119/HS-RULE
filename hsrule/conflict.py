@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from hsrule.answering import RagError, extract_json
 from hsrule.chains import ChainTimeout
+from hsrule.rag_config import message_text
 
 MAX_TEXT_CHARS = 100_000   # 웹 API의 추출 텍스트 한도와 같다
 PASSAGE_CHARS = 600        # 문단 하나의 길이 상한
@@ -170,7 +171,7 @@ class ConflictAnalyzer:
         last = None
         for _ in range(self.max_parse_attempts):
             try:
-                text = self.llm.invoke(messages).content
+                text = message_text(self.llm.invoke(messages).content)
             except (ChainTimeout, TimeoutError) as exc:
                 raise RagError("rag_backend_error", "충돌 분석 모델이 시간 안에 응답하지 않았습니다.",
                                "timeout") from exc
@@ -178,7 +179,7 @@ class ConflictAnalyzer:
                 # provider 예외 본문에는 문서 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "충돌 분석 모델 호출에 실패했습니다.", "provider") from exc
             try:
-                return BatchResult.model_validate(extract_json(text if isinstance(text, str) else str(text)))
+                return BatchResult.model_validate(extract_json(text))
             except (ValueError, ValidationError) as exc:
                 last = exc
                 messages = messages + [HumanMessage("형식 오류: 지정한 JSON 객체만 다시 출력하라. " + str(exc)[:200])]
