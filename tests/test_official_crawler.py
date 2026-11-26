@@ -504,12 +504,42 @@ class BuildRegulationTests(unittest.TestCase):
         json.dumps(item, ensure_ascii=False)  # 스냅샷 JSON으로 그대로 직렬화된다.
 
     def test_future_revision_is_recorded_not_indexed(self):
-        # 시행일 이전 날짜로 보면 1717은 시행예정이다. 실제 1647 본문 대신 같은 fixture를 응답으로 쓴다.
-        stub = StubClient(fixture("detail_20.html"), fixture("content_20.html"))
+        # 11/10 기준 1717(11/11)은 시행예정이다. 실제 1647 본문(2026-04-21 개정)을 응답으로 쓴다.
+        stub = StubClient(fixture("detail_20.html"), fixture("content_20_1647.html"))
         item = build_regulation(stub, self.ENTRY, date(2026, 11, 10), now=self.NOW)
         self.assertEqual(stub.requested[-1], ("content", 20, 1647))
         self.assertEqual(item["revision_id"], "20:1647")
         self.assertEqual(item["upcoming"], [{"history": 1717, "effective_date": "2026-11-11", "kind": "개정"}])
+        self.assertNotIn("2026. 11. 11. 공포", item["text"])
+        self.assertEqual([a["label"] for a in item["articles"] if a["kind"] == "addendum"],
+                         ["부칙#1", "부칙(2026.4.21.공포)"])
+
+    def test_body_of_another_revision_is_rejected(self):
+        today = date(2026, 11, 10)  # 시행 중 개정은 1647
+        later = fixture("content_20.html")  # 1717 본문
+        own = fixture("content_20_1647.html")
+        cases = {
+            # 리뷰 #61 재현: 1647을 요청했는데 1717 본문(11/11 부칙 포함)이 온 경우
+            "later revision body": (later, "revision_mismatch"),
+            # 합성: 링크가 하나도 없어 어느 개정인지 알 수 없는 본문
+            "no identifier": (re.sub(r"SEQ=20&amp;SEQ_HISTORY=1647", "", own), "revision_unidentified"),
+            # 합성: 링크가 두 개정을 섞어 가리킴
+            "mixed identifiers": (own.replace("SEQ_HISTORY=1647", "SEQ_HISTORY=1623", 1), "revision_mismatch"),
+            # 합성: 다른 SEQ를 가리킴(사이트는 요청 SEQ를 링크에 그대로 넣는다)
+            "other regulation": (own.replace("SEQ=20&amp;", "SEQ=99&amp;"), "revision_mismatch"),
+            # 합성: 링크는 1647인데 본문에 1647(4/21) 뒤에 공포된 부칙이 있음
+            "addendum after revision date": (own.replace(
+                "</div>\n</body>",
+                '<div class="addenda">부   칙 (2026. 11. 11. 공포)</div><div id="9"><div class="none">시행</div></div>'
+                "</div>\n</body>", 1), "revision_mismatch"),
+        }
+        self.assertEqual(build_regulation(StubClient(fixture("detail_20.html"), own), self.ENTRY, today,
+                                          now=self.NOW)["revision_id"], "20:1647")
+        for name, (content, reason) in cases.items():
+            self.assertNotEqual(content, own, f"합성 변형이 적용되지 않았습니다: {name}")
+            with self.subTest(name), self.assertRaises(PageError) as caught:
+                build_regulation(StubClient(fixture("detail_20.html"), content), self.ENTRY, today, now=self.NOW)
+            self.assertEqual(caught.exception.reason, reason)
 
     def test_abolished_regulation_is_marked_without_fetching_text(self):
         entry = CatalogEntry(197, "3-1-83", "창업R&D센터 규정", 928, ("제3편 학사행정", "제1장 일반행정"), (), True)

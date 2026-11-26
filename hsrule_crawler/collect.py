@@ -6,6 +6,7 @@
 import argparse
 import hashlib
 import json
+import re
 import sys
 from datetime import date, datetime, timezone
 from urllib.parse import urlencode
@@ -19,6 +20,43 @@ from .parser import parse_content
 def official_url(seq: int, history: int) -> str:
     """원문 링크는 서버가 공식 호스트로만 만든다."""
     return f"{BASE_URL}{LAW_PATH}/lawFullView.do?{urlencode({'SEQ': seq, 'SEQ_HISTORY': history})}"
+
+
+# 본문 안 조항 연혁·인쇄 링크(/lmxsrv/…?SEQ=20&SEQ_HISTORY=1717…). 사이트는 SEQ_HISTORY로 본문을 고르고
+# 같은 값을 이 링크에 넣으므로, 응답 본문이 어느 개정인지 알려 주는 유일한 표기다.
+_IDENTITY = re.compile(r"/lmxsrv/[\w/]+\.do\?SEQ=(\d+)&(?:amp;)?SEQ_HISTORY=(\d+)")
+_ADDENDUM_DATE = re.compile(r"(\d{4})\.(\d{1,2})\.(\d{1,2})")
+
+
+def response_revisions(html: str) -> set[tuple[int, int]]:
+    """본문 HTML의 링크가 가리키는 (SEQ, SEQ_HISTORY) 쌍."""
+    return {(int(seq), int(history)) for seq, history in _IDENTITY.findall(html)}
+
+
+def check_revision_identity(html: str, articles: list[dict], seq: int, revision) -> None:
+    """요청한 개정의 본문인지 확인한다. 식별 불가·불일치는 색인하지 않고 거부한다.
+
+    1. 링크의 (SEQ, SEQ_HISTORY)가 모두 요청과 같아야 한다. 링크가 하나도 없으면 revision_unidentified.
+    2. 본문 부칙의 공포일이 선택한 개정 날짜보다 늦으면 뒤 개정의 본문이다(공포일은 자기 개정 날짜보다
+       늦을 수 없다). 날짜를 읽을 수 없는 부칙은 이 검사에서 뺀다.
+    """
+    found = response_revisions(html)
+    if not found:
+        raise PageError("revision_unidentified", f"본문에서 개정 식별자를 찾지 못했습니다(요청 {seq}:{revision.history})")
+    if found != {(seq, revision.history)}:
+        shown = ", ".join(f"{s}:{h}" for s, h in sorted(found))
+        raise PageError("revision_mismatch", f"요청 {seq}:{revision.history}, 본문 링크 {shown}")
+    for item in articles:
+        match = _ADDENDUM_DATE.search(item["label"]) if item["kind"] == "addendum" else None
+        if match is None:
+            continue
+        try:
+            promulgated = date(*map(int, match.groups()))
+        except ValueError:
+            continue
+        if promulgated > revision.effective:
+            raise PageError("revision_mismatch",
+                            f"{revision.effective} 개정 본문에 그 뒤 공포된 부칙이 있습니다: {item['heading']}")
 
 
 def _revision(revision) -> dict:
@@ -55,7 +93,9 @@ def build_regulation(client: OfficialClient, entry: CatalogEntry, today: date, n
             "fetched_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         }
     current, upcoming = select_revision(detail["revisions"], today)
-    parsed = parse_content(client.content_html(entry.seq, current.history), entry.title)
+    html = client.content_html(entry.seq, current.history)
+    parsed = parse_content(html, entry.title)
+    check_revision_identity(html, parsed["articles"], entry.seq, current)
     text = parsed["text"]
     return {
         "regulation_id": str(entry.seq),
