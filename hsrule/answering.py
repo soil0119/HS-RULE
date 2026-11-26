@@ -6,10 +6,12 @@
 import json
 import re
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_timeout_error, label_documents
+from hsrule.conditions import (GROUNDING_NOTICE, attach_questions, check_grounding, clarification,
+                               detect_conditions, format_conditions)
 
 REFUSAL = {
     "ko": "제공된 공식 규정에서 이 질문에 해당하는 근거를 찾지 못했습니다. 담당 부서에 문의해 주세요.",
@@ -17,11 +19,23 @@ REFUSAL = {
 }
 JSON_INSTRUCTION = (
     '\n\n출력 형식: 아래 JSON 객체 하나만 출력한다(설명·코드블록 금지).\n'
-    '{"found": true|false, "answer": "답변", "citations": ["S1"], "followups": ["후속 질문"]}\n'
+    '{"found": true|false, "answer": "답변", "citations": ["S1"], "followups": ["후속 질문"], '
+    '"needs_clarification": false, "clarifying_questions": [], "missing_conditions": []}\n'
     "- found는 [근거]만으로 답할 수 있을 때만 true. false이면 citations는 빈 배열이다.\n"
     "- citations에는 답변에 실제로 사용한 [근거]의 라벨만 넣는다. 없는 라벨을 만들지 않는다.\n"
-    "- followups는 최대 3개."
+    "- followups는 최대 3개.\n"
+    "- needs_clarification: [근거]의 규정이 입학년도·과정(학부/대학원/학석사연계)·학적 상태·소속 학과·적용 시점에 "
+    "따라 달라지는데 질문과 대화 이력, [사용자가 밝힌 조건]에 그 조건이 없을 때만 true. 이때 answer에는 근거로 "
+    "확인되는 조건별 규정을 짧게 설명하고, clarifying_questions(최대 2개)로 판단에 필요한 조건만 묻는다. "
+    "이름·연락처·학번 전체 같은 개인정보는 묻지 않는다. 이미 밝힌 조건은 다시 묻지 않는다.\n"
+    "- missing_conditions: admission_year, program, student_status, department, effective_date 중 빠진 조건."
 )
+REPAIR_INSTRUCTION = {
+    "ko": "검증 결과: 답변의 수치 {values}는 인용한 [근거]에서 확인되지 않는다. 인용한 근거에 적힌 수치만 쓰거나 "
+          "확인되지 않는 내용을 빼고, 같은 JSON 형식으로 다시 출력하라.",
+    "en": "Check result: the figures {values} in your answer are not in the cited [Evidence]. Use only figures "
+          "written in the cited evidence or remove the unsupported content, and output the same JSON format again.",
+}
 
 
 class RagError(RuntimeError):
@@ -43,6 +57,9 @@ class ModelAnswer(BaseModel):
     answer: str = Field(min_length=1, max_length=6000)
     citations: list[str] = Field(default_factory=list)
     followups: list[str] = Field(default_factory=list)
+    needs_clarification: bool = False
+    clarifying_questions: list[str] = Field(default_factory=list, max_length=10)
+    missing_conditions: list[str] = Field(default_factory=list, max_length=10)
 
 
 def extract_json(text: str) -> dict:
@@ -95,6 +112,10 @@ class CitedAnswerer:
 
     def answer(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
                language: str = "ko") -> dict:
+        """답변 결과: answer·found·sources·followups와 함께 clarification(추가 질문)·grounding(수치 검사)을 준다.
+
+        웹 API가 아직 구조화 필드를 쓰지 않아도 보이도록, 추가 질문과 근거 미확인 안내는 answer 본문에도 넣는다.
+        """
         try:
             state = self.chain.prepare(question, messages, include_private=include_private, language=language)
         except ValueError:
@@ -105,22 +126,65 @@ class CitedAnswerer:
                                "timeout") from exc
             raise RagError("rag_backend_error", "검색 단계에서 오류가 발생했습니다.", "provider") from exc
         docs = state["docs"]
+        user_texts = [question] + [m.get("content", "") for m in messages or [] if m.get("role") == "user"]
+        provided = detect_conditions(user_texts)
+        no_clarification = {"needed": False, "questions": [], "missing": [], "dropped_personal_questions": 0}
         if not docs:  # 근거 후보가 없으면 모델을 부르지 않고 거절한다(근거 없음).
             return {"answer": REFUSAL[language], "found": False, "sources": [], "followups": [],
-                    "reason": "no_evidence"}
-        parsed = self._ask(state)
+                    "reason": "no_evidence", "clarification": no_clarification,
+                    "grounding": {"checked": 0, "unsupported": [], "verified": True, "repaired": False}}
+        state["provided_conditions"] = provided
+        parsed, messages_used = self._ask(state)
         kept, dropped = validate(parsed, docs, include_private=include_private)
-        if not parsed.found:
-            return {"answer": parsed.answer, "found": False, "sources": [], "followups": parsed.followups[:3]}
         by_label = {doc.metadata["label"]: doc for doc in docs}
-        return {"answer": parsed.answer, "found": True, "sources": [source_of(by_label[l]) for l in kept],
-                "followups": [f.strip() for f in parsed.followups if f.strip()][:3],
-                "dropped_citations": dropped}
+        grounding = {"checked": 0, "unsupported": [], "verified": True, "repaired": False}
+        if parsed.found:
+            parsed, kept, dropped, grounding = self._ground(state, parsed, kept, dropped, by_label, user_texts,
+                                                            messages_used, include_private)
+        asked = clarification(parsed.needs_clarification, parsed.clarifying_questions, parsed.missing_conditions,
+                              provided, language)
+        text = parsed.answer
+        if asked["needed"]:
+            text = attach_questions(text, asked["questions"], language)
+        if not grounding["verified"]:
+            text = text.rstrip() + "\n\n" + GROUNDING_NOTICE[language].format(values=", ".join(grounding["unsupported"]))
+        base = {"answer": text, "clarification": asked, "grounding": grounding,
+                "followups": [f.strip() for f in parsed.followups if f.strip()][:3]}
+        if not parsed.found:
+            return dict(base, found=False, sources=[])
+        return dict(base, found=True, sources=[source_of(by_label[l]) for l in kept], dropped_citations=dropped)
 
-    def _ask(self, state: dict) -> ModelAnswer:
-        system = ANSWER_SYSTEM[state["language"]] + JSON_INSTRUCTION
-        messages = self.chain._answer_prompt.format_messages(
-            system=system, evidence=state["evidence"], history=state["history"], question=state["question"])
+    def _ground(self, state, parsed, kept, dropped, by_label, user_texts, messages, include_private):
+        """답변 수치를 인용 근거와 대조하고, 어긋나면 한 번만 고쳐 쓰게 한다(#78).
+
+        고쳐 쓰기가 실패하거나(시간·provider·형식) 그래도 어긋나면 처음 답변을 쓰고 verified=False로 표시한다.
+        """
+        def check(answer, labels):
+            return check_grounding(answer, [by_label[l].page_content for l in labels], user_texts)
+
+        result = dict(check(parsed.answer, kept), repaired=False)
+        if result["verified"]:
+            return parsed, kept, dropped, result
+        repair = messages + [AIMessage(parsed.model_dump_json()), HumanMessage(
+            REPAIR_INSTRUCTION[state["language"]].format(values=", ".join(result["unsupported"])))]
+        try:
+            fixed, _ = self._ask(state, repair)
+            fixed_kept, fixed_dropped = validate(fixed, list(by_label.values()), include_private=include_private)
+        except RagError:
+            return parsed, kept, dropped, result
+        if not fixed.found:  # 고쳐 쓰다 근거 없음으로 바뀌면 처음 답변의 미확인 표시를 유지한다.
+            return parsed, kept, dropped, result
+        fixed_result = dict(check(fixed.answer, fixed_kept), repaired=True)
+        if fixed_result["verified"]:
+            return fixed, fixed_kept, fixed_dropped, fixed_result
+        return parsed, kept, dropped, result
+
+    def _ask(self, state: dict, messages: list | None = None) -> tuple[ModelAnswer, list]:
+        if messages is None:
+            system = (ANSWER_SYSTEM[state["language"]] + JSON_INSTRUCTION
+                      + format_conditions(state.get("provided_conditions", {}), state["language"]))
+            messages = self.chain._answer_prompt.format_messages(
+                system=system, evidence=state["evidence"], history=state["history"], question=state["question"])
         last_error = None
         for _ in range(self.max_parse_attempts):
             try:
@@ -131,7 +195,7 @@ class CitedAnswerer:
                 # provider 예외 본문에는 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "답변 모델 호출에 실패했습니다.", "provider") from exc
             try:
-                return ModelAnswer.model_validate(extract_json(text))
+                return ModelAnswer.model_validate(extract_json(text)), messages
             except (ValueError, ValidationError) as exc:
                 last_error = exc
                 messages = messages + [HumanMessage("형식 오류: 지정한 JSON 객체만 다시 출력하라. " + str(exc)[:200])]
