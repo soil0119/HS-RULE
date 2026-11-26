@@ -79,8 +79,8 @@ def index_regulation(regulation: dict, repository, embeddings, *, max_tokens: in
                      force: bool = False, attempts: int = 3, sleep=time.sleep) -> dict:
     """검증된 공식 규정 한 건을 색인한다.
 
-    본문·모델·청킹 설정·공개 범위가 모두 같으면 건너뛴다(unchanged). 본문은 같고 공개 범위만
-    바뀌었으면 다시 임베딩하지 않고 범위만 반영한다(rescoped).
+    본문·제목·모델·청킹 설정·공개 범위·공식 URL이 모두 같으면 건너뛴다(unchanged). 본문과 제목은 같고
+    공개 범위나 공식 URL만 바뀌었으면 다시 임베딩하지 않고 그 값만 반영한다(rescoped).
     폐지된 규정(abolished)은 색인에서 제거한다(abolished).
     """
     params = {"max_tokens": max_tokens, "overlap_tokens": overlap_tokens}
@@ -98,14 +98,23 @@ def index_regulation(regulation: dict, repository, embeddings, *, max_tokens: in
         raise IndexingError("청킹 검증 실패: " + "; ".join(problems[:3]))
     text_hash = chunks[0]["text_hash"]
     existing = repository.get_revision(regulation["revision_id"])
+    # 제목은 embedding_text의 접두사에 들어가므로 바뀌면 다시 임베딩한다(#55). 공식 URL은 임베딩과 무관하다.
     same_content = (existing and not force and existing["text_hash"] == text_hash
+                    and existing["title"] == regulation["title"]
                     and existing["embedding_model"] == embeddings.model_name
                     and existing["chunk_params"] == params and existing["is_current"] == make_current)
-    if same_content and existing["visibility"] == visibility:
+    url_changed = bool(same_content) and existing["official_url"] != regulation["official_url"]
+    visibility_changed = bool(same_content) and existing["visibility"] != visibility
+    if same_content and not url_changed and not visibility_changed:
         return {"status": "unchanged", "revision_id": regulation["revision_id"], "chunks": existing["chunk_count"]}
-    if same_content:  # 공개 범위만 달라졌다.
-        repository.set_visibility(regulation["regulation_id"], visibility)
-        return {"status": "rescoped", "revision_id": regulation["revision_id"], "chunks": existing["chunk_count"]}
+    if same_content:  # 공개 범위나 공식 URL 같은 메타데이터만 달라졌다. 다시 임베딩하지 않는다.
+        if url_changed:
+            repository.set_official_url(regulation["revision_id"], regulation["official_url"])
+        if visibility_changed:
+            repository.set_visibility(regulation["regulation_id"], visibility)
+        return {"status": "rescoped", "revision_id": regulation["revision_id"], "chunks": existing["chunk_count"],
+                "updated": [name for name, changed in (("official_url", url_changed),
+                                                       ("visibility", visibility_changed)) if changed]}
     vectors = _embed_in_batches(embeddings, [chunk["embedding_text"] for chunk in chunks], batch_size,
                                 attempts=attempts, sleep=sleep)
     revision = {"revision_id": regulation["revision_id"], "regulation_id": regulation["regulation_id"],
@@ -124,6 +133,11 @@ def sync_snapshot(regulations: list[dict], repository, embeddings, *, keep_previ
     - 스냅샷에 없는 규정은 색인에서 지운다. 단, 스냅샷이 비었거나 실패가 있으면 아무것도 지우지 않는다.
     - 규정마다 현재 개정과 이전 keep_previous개 개정만 보관한다.
     - 실행 기록을 DB에 남긴다. 중단되면 finished_at이 비어 있어 재개가 필요함을 알 수 있다.
+    - 정리(prune)·누락 규정 삭제 같은 내부 오류로 실행이 끝까지 가지 못하면 성공으로 기록하지 않는다(#56).
+      이 경우 report["aborted"]에 원인을 남기고 ok=False로 마감한 뒤 예외를 그대로 올린다. 이미 색인된
+      개정은 되돌리지 않고(이전 색인 보존), 같은 스냅샷으로 다시 실행하면 unchanged로 건너뛰며 이어진다.
+    - 실행 보고 저장(finish_run)이 실패하면 기록은 finished_at 없이 남아 중단으로 보인다. 정상 종료 뒤의 저장
+      실패는 예외로 알리고, 이미 중단 중이면 원래 예외를 그대로 올린다.
     """
     report = {"indexed": [], "unchanged": [], "rescoped": [], "abolished": [], "failed": [], "removed": [],
               "pruned": 0, "preflight": None}
@@ -131,6 +145,7 @@ def sync_snapshot(regulations: list[dict], repository, embeddings, *, keep_previ
         report["preflight"] = validate_embeddings(embeddings, options.get("max_tokens", 128))
     run_id = repository.start_run(embeddings.model_name,
                                  [r.get("revision_id") for r in regulations]) if record_run else None
+    completed = False
     try:
         seen = set()
         for regulation in regulations:
@@ -149,9 +164,19 @@ def sync_snapshot(regulations: list[dict], repository, embeddings, *, keep_previ
                 if regulation_id not in seen:
                     repository.delete_regulation(regulation_id)
                     report["removed"].append(regulation_id)
+        completed = True
+    except BaseException as exc:
+        report["aborted"] = {"error_type": type(exc).__name__, "message": str(exc)[:200]}
+        raise
     finally:
         if run_id is not None:
-            repository.finish_run(run_id, report, not report["failed"])
+            try:
+                repository.finish_run(run_id, report, completed and not report["failed"])
+            except Exception:
+                # 보고 저장 실패: 실행 기록은 finished_at 없이 남아 중단된 실행으로 보인다(재실행 대상).
+                # 정상 종료였다면 이 오류를 알리고, 이미 다른 오류로 중단 중이면 원래 예외를 가리지 않는다.
+                if completed:
+                    raise
     return report
 
 
