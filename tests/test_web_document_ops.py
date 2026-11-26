@@ -1,6 +1,7 @@
-"""문서 저장소 운영 회귀(#21): migration 기준선, 최소 권한 역할, 동시 업로드·삭제, 다운로드 중 삭제."""
+"""문서 저장소 운영 회귀(#21): migration 기준선, 최소 권한 역할, 동시 업로드·삭제, 다운로드 중 삭제, 읽기 전용 점검."""
 import asyncio
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -225,25 +226,25 @@ class DocumentStoreOpsTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("upload never waited for the competing transaction")
 
-    def paused_delete(self, document_id, *, commit):
-        """Run delete in a thread, holding it after DELETE and before COMMIT until released."""
+    def paused(self, call, *args, commit=True, **kwargs):
+        """Run a store call in a thread, holding it just before its COMMIT until released."""
         reached, release = Event(), Event()
         connect = psycopg2.connect
-        deleter = "paused-delete"
+        deleter = "paused-store-call"
 
         class PausedCommit(connection):
             def __exit__(self, exc_type, exc, traceback):
                 if exc_type is None and current_thread().name.startswith(deleter):
                     reached.set()
                     if not release.wait(timeout=8):
-                        raise TimeoutError("test did not release the delete")
+                        raise TimeoutError("test did not release the store call")
                     if not commit:
                         super().__exit__(psycopg2.OperationalError, None, None)  # roll back
-                        raise psycopg2.OperationalError("test: delete transaction rolled back")
+                        raise psycopg2.OperationalError("test: transaction rolled back")
                 return super().__exit__(exc_type, exc, traceback)
 
         def connect_with_pause(dsn, **options):
-            # Only the delete transaction pauses; its recovery connection (if any) behaves normally.
+            # Only the first transaction pauses; its recovery connection (if any) behaves normally.
             if current_thread().name.startswith(deleter) and not reached.is_set():
                 return connect(dsn, connection_factory=PausedCommit, **options)
             return connect(dsn, **options)
@@ -254,15 +255,15 @@ class DocumentStoreOpsTests(unittest.TestCase):
         patcher = patch("hsrule_web.documents.psycopg2.connect", side_effect=connect_with_pause)
         patcher.start()
         self.addCleanup(patcher.stop)
-        future = pool.submit(self.store.delete, document_id)
-        self.assertTrue(reached.wait(timeout=5), "delete never reached its commit")
+        future = pool.submit(call, *args, **kwargs)
+        self.assertTrue(reached.wait(timeout=5), "store call never reached its commit")
         return future, release
 
     def test_reupload_during_delete_waits_and_succeeds_after_the_delete_commits(self):
         self.store.initialize()
         data = make_pdf("Delete then upload again")
         old = self.store.save(data, "old.pdf", visibility="public")
-        deleting, release = self.paused_delete(old.id, commit=True)
+        deleting, release = self.paused(self.store.delete, old.id, commit=True)
         self.assertEqual(self.files(), [f".{old.id}.pdf.deleting"])
 
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -283,7 +284,7 @@ class DocumentStoreOpsTests(unittest.TestCase):
         self.store.initialize()
         data = make_pdf("Delete fails, upload again")
         old = self.store.save(data, "old.pdf", visibility="public")
-        deleting, release = self.paused_delete(old.id, commit=False)
+        deleting, release = self.paused(self.store.delete, old.id, commit=False)
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             upload = pool.submit(self.make_store().save, data, "new.pdf", visibility="public")
@@ -362,6 +363,112 @@ class DocumentStoreOpsTests(unittest.TestCase):
         status, _ = asyncio.run(self.download(self.app(DeleteAfterLookup()), f"/documents/{document.id}/file"))
         self.assertEqual(status, 404)
         self.assertEqual(self.files(), [])
+
+    # --- read-only storage check -------------------------------------------------------------------
+
+    def check(self, **options):
+        from hsrule_web.storage_check import check_storage
+
+        return [(finding.kind, finding.name) for finding in check_storage(self.dsn, self.upload_dir, **options)]
+
+    def snapshot(self):
+        contents = {path.name: path.read_bytes() if path.is_file() else None for path in self.upload_dir.iterdir()}
+        return self.rows(), contents
+
+    def test_storage_check_reports_every_mismatch_without_changing_anything(self):
+        self.store.initialize()
+        save = lambda text: self.store.save(make_pdf(text, "page 2"), f"{text}.pdf")  # noqa: E731
+        clean, missing, recoverable, stale, tampered, short = (
+            save(name) for name in ("clean", "missing", "recoverable", "stale", "tampered", "short"))
+        path = self.store.file_path
+        pending = lambda document: path(document.id).with_name(f".{document.id}.pdf.deleting")  # noqa: E731
+
+        path(missing.id).unlink()
+        path(recoverable.id).replace(pending(recoverable))
+        pending(stale).write_bytes(path(stale.id).read_bytes())
+        path(tampered.id).write_bytes(b"%PDF-1.4 changed %%EOF")
+        self.query("DELETE FROM web_document_pages WHERE document_id = %s AND page_number = 2", (short.id,))
+        unregistered, leftover, directory = uuid4().hex, uuid4().hex, uuid4().hex
+        (self.upload_dir / f"{unregistered}.pdf").write_bytes(b"orphan")
+        (self.upload_dir / f".{leftover}.pdf.deleting").write_bytes(b"orphan backup")
+        (self.upload_dir / f"{directory}.pdf").mkdir()
+        (self.upload_dir / "notes.txt").write_text("stray")
+        before = self.snapshot()
+
+        expected = sorted([
+            ("leftover_pending", f".{leftover}.pdf.deleting"),
+            ("missing_original", f"{missing.id}.pdf"),
+            ("not_regular_file", f"{directory}.pdf"),
+            ("page_count_mismatch", f"{short.id}.pdf"),
+            ("recoverable_original", f".{recoverable.id}.pdf.deleting"),
+            ("stale_pending", f".{stale.id}.pdf.deleting"),
+            ("unknown_file", "notes.txt"),
+            ("unregistered_file", f"{unregistered}.pdf"),
+        ])
+        self.assertEqual(self.check(), expected)
+        self.assertEqual(self.check(verify_hash=True), sorted(expected + [("hash_mismatch", f"{tampered.id}.pdf")]))
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn(clean.id, str(self.check(verify_hash=True)))
+
+    def test_storage_check_session_cannot_write(self):
+        from hsrule_web import storage_check
+
+        self.store.initialize()
+        self.store.save(make_pdf("Read only"), "read-only.pdf")
+        original = storage_check._check_document
+
+        def try_to_write(cursor, *args):
+            with self.assertRaises(psycopg2.errors.ReadOnlySqlTransaction):
+                cursor.execute("DELETE FROM web_documents")
+            return original(cursor, *args)
+
+        with patch.object(storage_check, "_check_document", try_to_write):
+            self.assertEqual(self.check(), [])
+        self.assertEqual(len(self.rows()[0]), 1)
+
+    def test_storage_check_waits_for_an_upload_in_progress_instead_of_reporting_it(self):
+        from hsrule_web.storage_check import check_storage
+
+        self.store.initialize()
+        saving, release = self.paused(self.store.save, make_pdf("In flight"), "flight.pdf", commit=True)
+        # The file exists and the row is not committed yet: a naive scan would call it unregistered.
+        self.assertEqual(len(self.files()), 1)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            checking = pool.submit(check_storage, self.dsn, self.upload_dir)
+            time.sleep(0.3)
+            self.assertFalse(checking.done(), "check did not wait for the document lock")
+            release.set()
+            document = saving.result(timeout=5)
+            self.assertEqual(checking.result(timeout=5), [])
+        self.assertEqual(self.files(), [f"{document.id}.pdf"])
+
+    def test_storage_check_reports_busy_when_a_document_stays_locked(self):
+        self.store.initialize()
+        saving, release = self.paused(self.store.save, make_pdf("Stuck"), "stuck.pdf", commit=True)
+        [name] = self.files()
+        self.assertEqual(self.check(lock_timeout=0.2), [("busy", name)])
+        release.set()
+        saving.result(timeout=5)
+        self.assertEqual(self.check(), [])
+
+    def test_storage_check_cli_exit_status_and_json(self):
+        from hsrule_web.storage_check import main
+
+        self.store.initialize()
+        document = self.store.save(make_pdf("CLI"), "cli.pdf")
+        env = {"DATABASE_URL": self.dsn, "UPLOAD_DIR": str(self.upload_dir)}
+        with patch.dict(os.environ, env):
+            with redirect_stdout(StringIO()) as output:
+                self.assertEqual(main([]), 0)
+            self.assertIn("OK", output.getvalue())
+            self.store.file_path(document.id).unlink()
+            with redirect_stdout(StringIO()) as output:
+                self.assertEqual(main(["--json"]), 1)
+            self.assertEqual([(item["kind"], item["document_id"]) for item in json.loads(output.getvalue())],
+                             [("missing_original", document.id)])
+        with patch.dict(os.environ, {**env, "UPLOAD_DIR": str(self.upload_dir / "absent")}):
+            with redirect_stdout(StringIO()), patch("sys.stderr", StringIO()):
+                self.assertEqual(main([]), 2)
 
 
 if __name__ == "__main__":

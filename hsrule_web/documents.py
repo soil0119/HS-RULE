@@ -115,6 +115,11 @@ def parse_pdf(data: bytes) -> tuple[list[DocumentPage], list[str]]:
     return pages, warnings
 
 
+def document_lock_id(document_id: str) -> int:
+    """Session advisory lock key shared by save, delete, recovery and the storage check."""
+    return int.from_bytes(bytes.fromhex(document_id[:16]), "big", signed=True)
+
+
 def _metadata(row) -> DocumentMetadata:
     return DocumentMetadata(**dict(zip(METADATA_COLUMNS.split(", "), row)))
 
@@ -149,11 +154,10 @@ class DocumentStore:
     def _document_connection(self, document_id: str):
         # A session lock covers commit and filesystem changes across workers.
         # A recovery connection takes the same lock before checking the current row.
-        lock_id = int.from_bytes(bytes.fromhex(document_id[:16]), "big", signed=True)
         with self._connection() as conn:
             conn.autocommit = True
             with conn.cursor() as cursor:
-                cursor.execute("SELECT pg_advisory_lock(%s)", (lock_id,))
+                cursor.execute("SELECT pg_advisory_lock(%s)", (document_lock_id(document_id),))
             conn.autocommit = False
             yield conn
 
