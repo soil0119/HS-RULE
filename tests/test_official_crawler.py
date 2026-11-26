@@ -186,6 +186,130 @@ class ContentParserTests(unittest.TestCase):
         self.assertIn("새 형식 블록 내용", result["text"].split("\n"))
         self.assertEqual(result["warnings"], ["분류할 수 없는 블록: '새 형식 블록 내용'"])
 
+    # --- #65 본문 노드 보존 -------------------------------------------------------------------------
+
+    def parse(self, html):
+        return parse_content(html, "한성대학교 학칙")
+
+    def addendum_text(self, result, label):
+        item = next(item for item in result["articles"] if item["label"] == label)
+        return result["text"][item["start"]:item["end"]]
+
+    def test_direct_text_in_an_addendum_body_is_kept(self):
+        # 합성(리뷰 #65 재현): 부칙 본문의 시행일 문장을 감싸는 태그 없이 직접 텍스트로 둔다.
+        sentence = "(시행일) 본 학칙은 1972년 12월 21일부터 시행한다."
+        html = fixture("content_20.html").replace(
+            '<div id="111181"><div class="none"><span style="0">(시행일) 본 학칙은 1972년 12월 21일부터 시행한다. '
+            '</span></div></div>', f'<div id="111181">{sentence}</div>')
+        self.assertNotEqual(html, fixture("content_20.html"))
+        result = self.parse(html)
+        self.assertIn(sentence, self.addendum_text(result, "부칙#1"))
+        self.assertEqual(result["warnings"], [])
+        # 수집 단계에서 빠지면 청커도 검출할 수 없으므로(리뷰 지적), 청크까지 문장이 이어지는지 본다.
+        regulation = {"regulation_id": "20", "revision_id": "20:1717", "title": result["title"],
+                      "official_url": official_url(20, 1717), "text": result["text"]}
+        tokenizer = local_tokenizer(result["text"])
+        chunks = chunk_regulation(regulation, tokenizer, 128, 16)
+        self.assertEqual(verify_chunks(regulation, chunks, tokenizer, 128), [])
+        self.assertTrue(any(sentence in chunk["content"] for chunk in chunks))
+
+    def test_mixed_inline_block_comment_and_table_nodes_keep_source_order(self):
+        # 합성: 직접 텍스트·인라인·블록·<br>·주석·script·중첩 표가 섞인 부칙 본문
+        body = ('<div id="111181">앞 문장 <b>굵게</b> 이어짐<!-- 주석 --><script>var x = 1;</script>'
+                '<div class="none">블록 문장</div>꼬리 문장<br/>줄바꿈 뒤'
+                '<table><caption>표 이름</caption><tr><td>칸1</td><td>칸2 <table><tr><td>안쪽</td></tr></table></td></tr>'
+                '</table>표 뒤</div>')
+        html = re.sub(r'<div id="111181">.*?</div></div>', body, fixture("content_20.html"), count=1, flags=re.S)
+        result = self.parse(html)
+        self.assertEqual(self.addendum_text(result, "부칙#1").split("\n"),
+                         ["부 칙", "앞 문장 굵게 이어짐", "블록 문장", "꼬리 문장", "줄바꿈 뒤", "표 이름", "칸1 | 칸2 안쪽",
+                          "표 뒤"])
+        self.assertNotIn("var x", result["text"])
+        self.assertNotIn("주석", result["text"])
+
+    def test_empty_addendum_body_and_stray_top_level_content_are_reported(self):
+        # 합성: 빈 부칙 본문, 최상위의 직접 텍스트와 div가 아닌 블록. 빈 앵커는 조용히 넘긴다.
+        html = re.sub(r'<div id="111181">.*?</div></div>', '<div id="111181"> <!-- 비어 있음 --> </div>',
+                      fixture("content_20.html"), count=1, flags=re.S)
+        html = html.replace('<div class="article" style="font-size: 10pt;">',
+                            '<a name="77"></a>최상위 직접 문장<p>문단 블록</p>'
+                            '<div class="article" style="font-size: 10pt;">', 1)
+        result = self.parse(html)
+        lines = result["text"].split("\n")
+        self.assertIn("최상위 직접 문장", lines)
+        self.assertIn("문단 블록", lines)
+        self.assertEqual(result["warnings"], ["부칙 본문이 비어 있습니다: 부 칙",
+                                              "분류할 수 없는 최상위 내용: '최상위 직접 문장'",
+                                              "분류할 수 없는 최상위 내용: '문단 블록'"])
+
+    def test_direct_text_in_an_article_body_is_kept(self):
+        # 합성: 조항 본문에 태그 없는 텍스트가 섞인 경우
+        html = fixture("content_20.html")
+        changed = re.sub(r'(<div class="JO"[^>]*>.*?<div class="article".*?</div>)',
+                         r'\1조항 직접 문장', html, count=1, flags=re.S)
+        self.assertNotEqual(changed, html)
+        self.assertIn("조항 직접 문장", self.parse(changed)["text"])
+
+    def test_every_text_node_of_the_real_fixtures_reaches_the_output(self):
+        # 실제 fixture 전체: 첨부 목록(이름만 남김)과 조항 제목 표의 화면용 caption('조항') 밖의
+        # 모든 텍스트 노드가 출력 text에 들어간다.
+        from bs4 import BeautifulSoup, Comment
+
+        for name in ("content_20.html", "content_18_reference.html", "content_118_history.html",
+                     "content_66_untitled.html"):
+            html = fixture(name)
+            root = BeautifulSoup(html, "lxml").select_one("#lawcontent")
+            result = parse_content(html, root.select_one(".lawname").get_text(" "))
+            compact = re.sub(r"\s+", "", result["text"])
+            with self.subTest(name):
+                for node in root.find_all(string=True):
+                    attachment_list = any("article" in (parent.get("class") or []) and parent.parent is root
+                                          for parent in node.parents)
+                    heading_caption = node.parent.name == "caption" and node.find_parent(class_="article")
+                    if isinstance(node, Comment) or attachment_list or heading_caption or not node.strip():
+                        continue
+                    self.assertIn(re.sub(r"\s+", "", node), compact)
+
+    # --- #64 첨부 링크 연결 ---------------------------------------------------------------------------
+
+    def attachments_with(self, *items):
+        """합성: 첨부 목록을 (이름, [fileDown ID…]) 항목들로 바꾼다. 항목마다 실제 마크업과 같은 표 하나."""
+        blocks = []
+        for name, ids in items:
+            links = "".join(f'<a href="javascript:fileDown(\'{file_id}\', \'attach\');" style="margin: 5px;" '
+                            f'title="다운받기"><img alt="다운받기" src="/images/service/sub/ico_down.png"/></a>'
+                            for file_id in ids)
+            span = f'<span class="attach_file">{name}</span>' if name else ""
+            blocks.append('<div class="article" style="padding-left: 10px;"><table><caption>별지서식다운로드</caption>'
+                          f'<tr><td>{span}{links}</td></tr></table></div>')
+        html = re.sub(r'<div class="article" style="padding-left: 10px;">.*?</table>\s*</div>', "",
+                      fixture("content_20.html"), flags=re.S)
+        html = html.replace("</div>\n</body>", "".join(blocks) + "</div>\n</body>", 1)
+        result = self.parse(html)
+        return [(item["name"], item["file_id"]) for item in result["attachments"]], result["warnings"]
+
+    def test_missing_link_never_borrows_another_attachments_id(self):
+        full = [("별표1.hwp", ["4159"]), ("별표2.hwp", ["4160"]), ("별표3.hwp", ["4161"])]
+        for missing in range(3):
+            with self.subTest(missing=missing):
+                items = [(name, [] if index == missing else ids) for index, (name, ids) in enumerate(full)]
+                found, warnings = self.attachments_with(*items)
+                self.assertEqual(found, [(name, "" if index == missing else ids[0])
+                                         for index, (name, ids) in enumerate(full)])
+                self.assertEqual(warnings, [f"첨부 '{full[missing][0]}': 다운로드 링크가 없습니다"])
+
+    def test_two_names_in_one_cell_and_ambiguous_or_stray_links(self):
+        html = fixture("content_20.html").replace(
+            '<span class="attach_file">(별표 1)대학별 학부 및 학과 입학정원.hwp</span>',
+            '<span class="attach_file">앞 파일.hwp</span><span class="attach_file">(별표 1)대학별 학부 및 학과 입학정원.hwp</span>')
+        found = [(item["name"], item["file_id"]) for item in self.parse(html)["attachments"]]
+        self.assertEqual(found[:2], [("앞 파일.hwp", ""), ("(별표 1)대학별 학부 및 학과 입학정원.hwp", "4159")])
+
+        found, warnings = self.attachments_with(("둘.hwp", ["1", "2"]), ("", ["3"]), ("정상.hwp", ["4"]))
+        self.assertEqual(found, [("둘.hwp", ""), ("정상.hwp", "4")])
+        self.assertEqual(warnings, ["첨부 '둘.hwp': 다운로드 링크가 여러 개입니다(1, 2)",
+                                    "첨부 이름과 연결되지 않은 다운로드 링크: 3"])
+
     def test_rejects_error_empty_shell_login_and_wrong_regulation(self):
         cases = {
             "error_page": (fixture("error_redirect.html"), "한성대학교 학칙"),

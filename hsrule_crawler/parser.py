@@ -6,7 +6,7 @@
 """
 import re
 
-from bs4 import NavigableString, Tag
+from bs4 import Comment, Declaration, Doctype, NavigableString, ProcessingInstruction, Tag
 
 from .catalog import same_title
 from .pages import PageError, normalize_space, service_soup
@@ -16,6 +16,12 @@ _FILE_DOWN = re.compile(r"fileDown\(\s*'(\d+)'\s*,\s*'attach'\s*\)")
 _DELETED = re.compile(r"^[(（]?삭제")
 _ADDENDUM = re.compile(r"^부\s*칙(?:\s*\(([^)]*)\))?$")
 HEADING_CLASSES = ("chapter", "section", "subsection")  # 장·절·관
+# 본문으로 읽지 않는 노드. 이 밖의 텍스트는 위치를 모르더라도 버리지 않고 경고와 함께 남긴다.
+_IGNORED_STRINGS = (Comment, Declaration, Doctype, ProcessingInstruction)
+_IGNORED_TAGS = {"script", "style", "noscript", "template"}
+# 직접 텍스트와 이어서 한 줄을 이루는 태그
+_INLINE_TAGS = {"a", "abbr", "b", "big", "code", "em", "font", "i", "label", "mark", "s", "small", "span",
+                "strike", "strong", "sub", "sup", "u"}
 _HEADING_SELECTOR = ", ".join(f".{name}" for name in HEADING_CLASSES)
 
 
@@ -33,8 +39,14 @@ def article_label(heading: str) -> str:
 
 
 def _table_lines(table: Tag) -> list[str]:
-    """표는 행마다 한 줄로, 칸은 ' | '로 잇는다. 빈 칸은 순서를 지키려 빈 문자열로 둔다."""
-    lines = []
+    """표는 행마다 한 줄로, 칸은 ' | '로 잇는다. 빈 칸은 순서를 지키려 빈 문자열로 둔다.
+
+    본문 표의 caption은 첫 줄로 남긴다. (조항 제목 표의 '조항'과 첨부 표의 caption은 화면용 이름이며
+    이 함수를 거치지 않는다.)
+    """
+    caption = table.find("caption", recursive=False)
+    caption_text = normalize_space(caption.get_text(" ")) if caption is not None else ""
+    lines = [caption_text] if caption_text else []
     for row in table.find_all("tr"):
         if row.find_parent("table") is not table:
             continue  # 표 안의 표는 해당 칸의 텍스트로 이미 포함된다.
@@ -72,6 +84,43 @@ def _block_lines(element: Tag) -> list[str]:
     return lines
 
 
+def _content_lines(container: Tag, skip=lambda tag: False) -> list[str]:
+    """컨테이너의 자식을 원문 순서대로 줄로 바꾼다.
+
+    태그 없는 직접 텍스트와 인라인 태그는 이어서 한 줄로, 블록 태그는 _block_lines로, <br>은 줄바꿈으로
+    다룬다. 주석·선언·script/style과 skip이 참인 자식만 읽지 않는다.
+    """
+    lines, pending = [], []
+
+    def flush():
+        text = normalize_space(" ".join(pending))
+        if text:
+            lines.append(text)
+        pending.clear()
+
+    for child in container.children:
+        if isinstance(child, _IGNORED_STRINGS):
+            continue
+        if isinstance(child, NavigableString):
+            pending.append(str(child))
+        elif isinstance(child, Tag):
+            if child.name in _IGNORED_TAGS or skip(child):
+                continue
+            if child.name == "br":
+                flush()
+            elif child.name in _INLINE_TAGS and child.find("table") is None:
+                pending.append(child.get_text(" "))
+            else:
+                flush()
+                lines.extend(_block_lines(child))
+    flush()
+    return lines
+
+
+def _is_heading_cell(tag: Tag) -> bool:
+    return "article" in _classes(tag)
+
+
 class _Builder:
     """줄을 이어 붙이며 각 조항의 원문 범위(start/end)를 기록한다."""
 
@@ -101,15 +150,40 @@ class _Builder:
         return "\n".join(self.lines)
 
 
-def _attachments(block: Tag) -> list[dict]:
-    found = []
+def _file_ids(node) -> list[str]:
+    if not isinstance(node, Tag):
+        return []
+    links = ([node] if node.name == "a" else []) + node.find_all("a")
+    return [match.group(1) for link in links if (match := _FILE_DOWN.search(link.get("href") or ""))]
+
+
+def _attachments(block: Tag) -> tuple[list[dict], list[str]]:
+    """첨부 이름(span.attach_file)마다 그 이름부터 다음 이름 직전까지의 형제 노드에서만 다운로드 링크를 찾는다.
+
+    링크가 없거나 둘 이상이면 다른 파일과 잘못 잇지 않도록 file_id를 비우고 경고한다.
+    """
+    found, warnings, used = [], [], []
     for span in block.select(".attach_file"):
         name = normalize_space(span.get_text(" "))
-        link = span.find_next("a", href=_FILE_DOWN)
-        file_id = _FILE_DOWN.search(link["href"]).group(1) if link else ""
-        if name:
-            found.append({"name": name, "file_id": file_id})
-    return found
+        ids = _file_ids(span)
+        for sibling in span.next_siblings:
+            if isinstance(sibling, Tag) and ("attach_file" in _classes(sibling) or sibling.select_one(".attach_file")):
+                break
+            ids += _file_ids(sibling)
+        ids = list(dict.fromkeys(ids))
+        used += ids
+        if not name:
+            if ids:
+                warnings.append(f"이름 없는 첨부 링크: {', '.join(ids)}")
+            continue
+        if len(ids) != 1:
+            problem = "다운로드 링크가 없습니다" if not ids else f"다운로드 링크가 여러 개입니다({', '.join(ids)})"
+            warnings.append(f"첨부 {name!r}: {problem}")
+        found.append({"name": name, "file_id": ids[0] if len(ids) == 1 else ""})
+    stray = [file_id for file_id in dict.fromkeys(_file_ids(block)) if file_id not in used]
+    if stray:
+        warnings.append(f"첨부 이름과 연결되지 않은 다운로드 링크: {', '.join(stray)}")
+    return found, warnings
 
 
 def parse_content(html: str, expected_title: str) -> dict:
@@ -132,8 +206,19 @@ def parse_content(html: str, expected_title: str) -> dict:
     pending_addendum = None
     addendum_count = 0
 
-    for block in root.find_all(recursive=False):
-        if not isinstance(block, Tag) or block.name != "div":
+    for block in root.children:
+        if isinstance(block, _IGNORED_STRINGS):
+            continue
+        if isinstance(block, NavigableString) or block.name != "div":
+            # 최상위에는 div만 온다. 빈 앵커(<a name="…">)는 조용히 넘기고, 텍스트가 있으면 경고와 함께 남긴다.
+            if isinstance(block, Tag) and block.name in _IGNORED_TAGS:
+                continue
+            lines = [normalize_space(str(block))] if isinstance(block, NavigableString) else _block_lines(block)
+            lines = [line for line in lines if line]
+            if lines:
+                warnings.append(f"분류할 수 없는 최상위 내용: {lines[0][:40]!r}")
+                for line in lines:
+                    out.add(line)
             continue
         classes = _classes(block)
         if "lawname" in classes:
@@ -142,9 +227,11 @@ def parse_content(html: str, expected_title: str) -> dict:
             item, pending_addendum = pending_addendum, None
             if not classes and block.get("id"):
                 item["id"] = block["id"]
-                for child in block.find_all(recursive=False):
-                    for line in _block_lines(child):
-                        out.add(line)
+                lines = _content_lines(block)
+                if not lines:
+                    warnings.append(f"부칙 본문이 비어 있습니다: {item['heading']}")
+                for line in lines:
+                    out.add(line)
                 continue
             warnings.append(f"부칙 본문 블록이 없습니다: {item['heading']}")
         if "history" in classes:  # 규정명 아래 제정·개정 연혁 줄('2005. 4.12. 제정')
@@ -169,21 +256,14 @@ def parse_content(html: str, expected_title: str) -> dict:
             if heading_cell is not None and not heading:
                 # 제목 없는 조항 틀에 연혁 메모('(2020.4.9. 제정)')만 담긴 경우. 조항이 아니다.
                 out.close_article()
-                for child in block.find_all(recursive=False):
-                    if "article" in _classes(child):
-                        continue
-                    for line in _block_lines(child):
-                        history_notes.append(line)
-                        out.add(line)
+                for line in _content_lines(block, skip=_is_heading_cell):
+                    history_notes.append(line)
+                    out.add(line)
                 continue
             if heading:
                 out.open_article({"id": block.get("id", ""), "kind": "article", "label": article_label(heading),
                                   "heading": heading, "chapter": chapter}, heading)
-                body = []
-                for child in block.find_all(recursive=False):
-                    if "article" in _classes(child):
-                        continue
-                    body.extend(_block_lines(child))
+                body = _content_lines(block, skip=_is_heading_cell)
                 for line in body:
                     out.add(line)
                 # 본문이 모두 "삭제"이거나, 본문 없이 제목에 삭제를 적은 범위 조문("제95조의4 ~ … (삭제 …)")
@@ -212,7 +292,9 @@ def parse_content(html: str, expected_title: str) -> dict:
             out.open_article(pending_addendum, heading)
             continue
         if "article" in classes:  # 문서 끝의 별표·서식 첨부 목록
-            attachments.extend(_attachments(block))
+            found, problems = _attachments(block)
+            attachments.extend(found)
+            warnings.extend(problems)
             continue
         unknown = normalize_space(block.get_text(" "))
         if unknown:  # 모르는 블록도 버리지 않는다. 경고와 함께 본문에 남긴다.
