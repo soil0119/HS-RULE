@@ -16,6 +16,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import psycopg2
+import psycopg2.extras
 from psycopg2 import sql
 from psycopg2.extensions import connection, make_dsn
 
@@ -469,6 +470,133 @@ class DocumentStoreOpsTests(unittest.TestCase):
         with patch.dict(os.environ, {**env, "UPLOAD_DIR": str(self.upload_dir / "absent")}):
             with redirect_stdout(StringIO()), patch("sys.stderr", StringIO()):
                 self.assertEqual(main([]), 2)
+
+
+    # --- backup / restore at one recovery point ----------------------------------------------------
+
+    def target(self):
+        """An empty schema and upload directory standing in for a replacement server."""
+        schema = "web_restore_" + uuid4().hex
+        self.admin(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        self.addCleanup(self.admin, sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        return make_dsn(DSN, options=f"-c search_path={schema}"), self.upload_dir.parent / f"restored-{schema}"
+
+    def rows_at(self, dsn):
+        with closing(psycopg2.connect(dsn)) as conn, conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM web_documents ORDER BY id")
+            documents = cur.fetchall()
+            cur.execute("SELECT * FROM web_document_pages ORDER BY document_id, page_number")
+            return documents, cur.fetchall()
+
+    def test_backup_and_restore_reproduce_the_recovery_point(self):
+        from hsrule_web.backup import create_backup, restore_backup
+        from hsrule_web.storage_check import check_storage
+
+        self.store.initialize()
+        kept = self.store.save(make_pdf("Kept", "탭\tand\nnewline"), "kept.pdf", visibility="public")
+        removed_later = self.store.save(make_pdf("Removed later"), "later.pdf", title="나중에 삭제")
+        (self.upload_dir / "notes.txt").write_text("not part of the store")
+        at_backup = self.rows()
+        backup_dir = self.upload_dir.parent / "backup"
+        manifest = create_backup(self.dsn, self.upload_dir, backup_dir)
+        self.assertEqual(manifest["tables"]["web_documents"]["rows"], 2)
+        self.assertEqual(set(manifest["files"]), {f"{kept.id}.pdf", f"{removed_later.id}.pdf"})
+
+        # Changes after the recovery point must not appear in the restore.
+        self.store.delete(removed_later.id)
+        self.store.save(make_pdf("Added later"), "added.pdf")
+
+        target_dsn, target_dir = self.target()
+        restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(self.rows_at(target_dsn), at_backup)
+        self.assertEqual(sorted(path.name for path in target_dir.iterdir()),
+                         sorted([f"{kept.id}.pdf", f"{removed_later.id}.pdf"]))
+        self.assertEqual(check_storage(target_dsn, target_dir, verify_hash=True), [])
+        restored = self.make_store(target_dsn)
+        restored.upload_dir = target_dir
+        self.assertEqual(restored.initialize(), [])
+        self.assertEqual(restored.get(kept.id, include_pages=True).pages[1].text,
+                         self.store.get(kept.id, include_pages=True).pages[1].text)
+
+    def test_backup_waits_for_writes_in_progress(self):
+        from hsrule_web.backup import create_backup
+
+        self.store.initialize()
+        doomed = self.store.save(make_pdf("Being deleted"), "doomed.pdf")
+        for call, args, included in ((self.store.save, (make_pdf("Being saved"), "new.pdf"), True),
+                                     (self.store.delete, (doomed.id,), False)):
+            with self.subTest(call=call.__name__):
+                running, release = self.paused(call, *args, commit=True)
+                backup_dir = self.upload_dir.parent / f"backup-{call.__name__}"
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    backing_up = pool.submit(create_backup, self.dsn, self.upload_dir, backup_dir)
+                    time.sleep(0.3)
+                    self.assertFalse(backing_up.done(), "backup did not wait for the write")
+                    release.set()
+                    result = running.result(timeout=5)
+                    manifest = backing_up.result(timeout=5)
+                ids = {row[0] for row in self.rows()[0]}
+                self.assertEqual({name[:-4] for name in manifest["files"]}, ids)
+                self.assertEqual((result.id if included else doomed.id) in ids, included)
+
+    def test_backup_refuses_a_missing_original_and_leaves_nothing(self):
+        from hsrule_web.backup import BackupError, create_backup
+
+        self.store.initialize()
+        document = self.store.save(make_pdf("Lost"), "lost.pdf")
+        self.store.file_path(document.id).unlink()
+        backup_dir = self.upload_dir.parent / "backup"
+        with self.assertRaises(BackupError):
+            create_backup(self.dsn, self.upload_dir, backup_dir)
+        self.assertFalse(backup_dir.exists())
+
+    def test_restore_refuses_unsafe_targets_and_damaged_backups(self):
+        from hsrule_web.backup import BackupError, create_backup, restore_backup
+
+        self.store.initialize()
+        document = self.store.save(make_pdf("Protected"), "protected.pdf")
+        backup_dir = self.upload_dir.parent / "backup"
+        create_backup(self.dsn, self.upload_dir, backup_dir)
+
+        with self.subTest("catalog already has rows"), self.assertRaises(BackupError):
+            restore_backup(backup_dir, self.dsn, self.upload_dir.parent / "empty")
+        self.assertFalse((self.upload_dir.parent / "empty").exists())
+        with self.subTest("upload directory not empty"), self.assertRaises(BackupError):
+            restore_backup(backup_dir, self.target()[0], self.upload_dir)
+
+        copy = backup_dir / "uploads" / f"{document.id}.pdf"
+        original = copy.read_bytes()
+        copy.write_bytes(original + b"x")
+        with self.subTest("damaged file"), self.assertRaises(BackupError):
+            restore_backup(backup_dir, *self.target())
+        copy.write_bytes(original)
+
+        manifest_path = backup_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(json.dumps({**manifest, "migrations": [["0001_web_documents.sql", "old"]]}))
+        with self.subTest("migration history differs"), self.assertRaises(BackupError):
+            restore_backup(backup_dir, *self.target())
+        manifest_path.write_text(json.dumps(manifest))
+
+        target_dsn, target_dir = self.target()
+        copy_expert = psycopg2.extensions.cursor.copy_expert
+        calls = []
+
+        def fail_on_pages(cursor, statement, source, *args):
+            calls.append(statement)
+            if "web_document_pages" in str(statement.as_string(cursor)):
+                raise psycopg2.OperationalError("test: connection lost during COPY")
+            return copy_expert(cursor, statement, source, *args)
+
+        with patch.object(psycopg2.extras.RealDictCursor, "copy_expert", fail_on_pages), \
+                self.assertRaises(psycopg2.OperationalError):
+            restore_backup(backup_dir, target_dsn, target_dir)
+        with closing(psycopg2.connect(target_dsn)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('web_documents'), to_regclass('web_migrations')")
+            self.assertEqual(cur.fetchone(), (None, None), "failed restore left tables behind")
+        self.assertFalse(target_dir.exists() and any(target_dir.iterdir()))
+        restore_backup(backup_dir, target_dsn, target_dir)  # a clean retry succeeds
+        self.assertEqual(len(self.rows_at(target_dsn)[0]), 1)
 
 
 if __name__ == "__main__":
