@@ -12,8 +12,10 @@ import psycopg2
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LAParams, LTContainer, LTTextContainer
 from pydantic import BaseModel
-from psycopg2.extras import execute_values
+from psycopg2 import sql
+from psycopg2.extras import RealDictCursor, execute_values
 
+from hsrule.migrations import apply_migrations
 from hsrule_web.errors import APIError
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
@@ -22,25 +24,16 @@ DOCUMENT_ID_PATTERN = r"^[0-9a-f]{32}$"
 Visibility = Literal["private", "public"]
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS web_documents (
-    id text PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
-    title text NOT NULL,
-    filename text NOT NULL,
-    visibility text NOT NULL CHECK (visibility IN ('private', 'public')),
-    content_hash text NOT NULL CONSTRAINT web_documents_content_hash_unique UNIQUE,
-    page_count integer NOT NULL CHECK (page_count BETWEEN 1 AND 1000),
-    warnings text[] NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS web_document_pages (
-    document_id text NOT NULL REFERENCES web_documents(id) ON DELETE CASCADE,
-    page_number integer NOT NULL CHECK (page_number BETWEEN 1 AND 1000),
-    text text NOT NULL,
-    PRIMARY KEY (document_id, page_number)
-);
-"""
+MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+MIGRATION_HISTORY = "web_migrations"
+# Any fixed key shared by every process that migrates the web tables.
+MIGRATION_LOCK = int.from_bytes(hashlib.sha256(b"hsrule_web.migrations").digest()[:8], "big", signed=True)
+# The app role reads and writes rows only. Row locks (FOR UPDATE/SHARE) need UPDATE on web_documents;
+# page rows are removed by the ON DELETE CASCADE trigger, which runs with the table owner's rights.
+APP_PRIVILEGES = {
+    "web_documents": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    "web_document_pages": ("SELECT", "INSERT"),
+}
 METADATA_COLUMNS = "id, title, filename, visibility, content_hash, page_count, warnings"
 
 
@@ -184,13 +177,38 @@ class DocumentStore:
     def _storage_error() -> APIError:
         return APIError(500, "document_storage_error", "문서 보관소 작업에 실패했습니다.")
 
-    def initialize(self) -> None:
+    def initialize(self) -> list[str]:
+        """Apply pending web migrations as the schema owner and return the applied file names.
+
+        A database created before versioned migrations adopts 0001 as its baseline without data changes.
+        """
         try:
             self.upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with self._transaction() as cursor:
-                cursor.execute(SCHEMA)
+            with self._connection() as conn, conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+                return apply_migrations(cursor, MIGRATIONS_DIR, history_table=MIGRATION_HISTORY)
         except OSError:
             raise self._storage_error() from None
+
+    def grant_app_role(self, role: str) -> None:
+        """Grant an existing login role only the row access the web app needs."""
+        with self._transaction() as cursor:
+            cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+            if cursor.fetchone() is None:
+                raise APIError(422, "invalid_input", f"DB 역할 {role!r}이 없습니다. 먼저 CREATE ROLE로 만드세요.")
+            cursor.execute(
+                "SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.oid = to_regclass('web_documents')"
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise APIError(503, "documents_unavailable", "web_documents가 없습니다. 먼저 migration을 적용하세요.")
+            schema, grantee = sql.Identifier(row[0]), sql.Identifier(role)
+            cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(schema, grantee))
+            for table, privileges in APP_PRIVILEGES.items():
+                cursor.execute(sql.SQL("GRANT {} ON TABLE {} TO {}").format(
+                    sql.SQL(", ").join(map(sql.SQL, privileges)), sql.Identifier(row[0], table), grantee,
+                ))
 
     def health(self) -> bool:
         if not self.upload_dir.is_dir() or not os.access(self.upload_dir, os.R_OK | os.W_OK | os.X_OK):
@@ -311,17 +329,33 @@ class DocumentStore:
         return True
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    from hsrule.migrations import MigrationError
     from hsrule_web.settings import Settings
+
+    parser = argparse.ArgumentParser(
+        prog="python -m hsrule_web.documents",
+        description="Apply web document migrations as the schema owner (DATABASE_URL).",
+    )
+    parser.add_argument("--grant-role", metavar="ROLE",
+                        help="after migrating, grant the existing app login ROLE row access only")
+    args = parser.parse_args(argv)
 
     settings = Settings.from_env()
     if not settings.database_url:
         raise SystemExit("DATABASE_URL is required to initialize the document store.")
+    store = DocumentStore(settings.database_url, settings.upload_dir)
     try:
-        DocumentStore(settings.database_url, settings.upload_dir).initialize()
-    except APIError as error:
-        raise SystemExit(error.detail) from None
-    print("Document store initialized.")
+        applied = store.initialize()
+        if args.grant_role:
+            store.grant_app_role(args.grant_role)
+    except (APIError, MigrationError) as error:
+        raise SystemExit(getattr(error, "detail", str(error))) from None
+    print(f"Document store initialized. Applied migrations: {', '.join(applied) or 'none (already current)'}.")
+    if args.grant_role:
+        print(f"Granted row access on web documents to {args.grant_role}.")
 
 
 if __name__ == "__main__":
