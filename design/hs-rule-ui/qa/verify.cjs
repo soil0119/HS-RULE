@@ -41,6 +41,7 @@ function environment(filename='index.html',width=1440,entries={},options={}) {
     localStorage:{getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,String(value)),removeItem:key=>memory.delete(key)},
     matchMedia:query=>({matches:query.includes('reduced-motion')?!!options.reducedMotion:query.includes('760px')?width<=760:query.includes('coarse')?width<=760:false,addEventListener(){}}),
     setTimeout:callback=>{const id=++timerId;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id),addEventListener(type,callback){(listeners[type]??=[]).push(callback);},dispatchEvent(event){for(const handler of listeners[event.type]||[])handler(event);return true;},open(url){const p={location:{href:url},opener:null,closed:false,close(){this.closed=true;}};opened.push(p);return p;},
+    scrollTo(options){this.scrollPosition=options;},
     fetch:async(path,options={})=>{fetchCalls.push({path,...options});const response=responses.shift();if(response instanceof Error)throw response;if(typeof response==='function')return response();return response||new Response('Unavailable',{status:503});}
   };
   context.window=context;const scope=vm.createContext(context);vm.runInContext(fs.readFileSync(project+'/i18n.js','utf8'),scope);vm.runInContext(fs.readFileSync(project+'/api.js','utf8'),scope);
@@ -95,6 +96,8 @@ async function checkFooterNavigation() {
     await footer.querySelector('[data-open-help]').click();
     ok(view.$('#help-dialog').open,'footer guidance opens the working help dialog');
   }
+  const navigation=environment('index.html');navigation.boot();navigation.context.location.hash='#library';await navigation.windowEvent('hashchange');
+  ok(navigation.document.activeElement===navigation.$('#main-content')&&navigation.context.scrollPosition.top===0,'footer navigation reveals the destination and moves keyboard focus to its content');
   const admin=environment('index.html',1440,{hsu_token:'test-only-session'});admin.boot();
   ok(admin.$('[data-admin-entry]').href==='upload.html','signed-in administrator entry leads to the existing protected tools');
   ok(admin.$('[data-admin-entry]').textContent==='관리자 도구','administrator entry identifies the tools clearly');

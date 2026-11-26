@@ -225,7 +225,7 @@
     input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && (event.ctrlKey || event.metaKey || !matchMedia('(pointer: coarse)').matches)) { event.preventDefault(); if (!busy) form.requestSubmit(); } });
     $('#new-question').addEventListener('click', newQuestion); $('#open-history').addEventListener('click', () => { renderHistory(); $('#history-dialog').showModal(); });
     document.addEventListener('keydown', event => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !$$('dialog').some(dialog => dialog.open)) { event.preventDefault(); newQuestion(); } });
-    $('#library-search').addEventListener('input', renderLibrary); $('#chapter-filter').addEventListener('change', event => { selectedChapter = event.target.value; renderLibrary(); $('#chapter-filter').focus({ preventScroll: true }); }); $('#refresh-library').addEventListener('click', loadLibrary); window.addEventListener('hashchange', showView);
+    $('#library-search').addEventListener('input', renderLibrary); $('#chapter-filter').addEventListener('change', event => { selectedChapter = event.target.value; renderLibrary(); $('#chapter-filter').focus({ preventScroll: true }); }); $('#refresh-library').addEventListener('click', loadLibrary); window.addEventListener('hashchange', () => { showView(); $('#main-content').focus({ preventScroll: true }); window.scrollTo({ top: 0 }); });
     refreshPage = () => { renderExamples(); updateQuestion(); renderHistory(); renderChat(); renderLibrary(); showView(); }; refreshPage();
   }
   function initLogin() {
