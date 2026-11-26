@@ -41,6 +41,7 @@ function environment(filename='index.html',width=1440,entries={},options={}) {
     localStorage:{getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,String(value)),removeItem:key=>memory.delete(key)},
     matchMedia:query=>({matches:query.includes('reduced-motion')?!!options.reducedMotion:query.includes('760px')?width<=760:query.includes('coarse')?width<=760:false,addEventListener(){}}),
     setTimeout:callback=>{const id=++timerId;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id),addEventListener(type,callback){(listeners[type]??=[]).push(callback);},dispatchEvent(event){for(const handler of listeners[event.type]||[])handler(event);return true;},open(url){const p={location:{href:url},opener:null,closed:false,close(){this.closed=true;}};opened.push(p);return p;},
+    scrollTo(options){this.scrollPosition=options;},
     fetch:async(path,options={})=>{fetchCalls.push({path,...options});const response=responses.shift();if(response instanceof Error)throw response;if(typeof response==='function')return response();return response||new Response('Unavailable',{status:503});}
   };
   context.window=context;const scope=vm.createContext(context);vm.runInContext(fs.readFileSync(project+'/i18n.js','utf8'),scope);vm.runInContext(fs.readFileSync(project+'/api.js','utf8'),scope);
@@ -84,7 +85,26 @@ async function checkAnimatedExamples() {
   const still=reduced.$('#question-input').placeholder;for(let i=0;i<100;i++)reduced.stepTimer();
   ok(still.length>5&&reduced.$('#question-input').placeholder===still,'reduced motion uses a complete static example');
 }
+async function checkFooterNavigation() {
+  for(const filename of ['index.html','login.html','upload.html']) {
+    const view=environment(filename);view.boot();
+    const header=view.$('.app-header'),footer=view.$('.site-footer');
+    ok(footer,'every screen provides the shared bottom navigation');
+    ok(!header.querySelector('[data-nav="library"]')&&!header.querySelector('[data-nav="upload"]'),'public top navigation separates regulation sources and document administration');
+    ok(footer.querySelector('[data-route="library"]')?.href==='index.html#library','regulation sources remain reachable from the footer');
+    ok(footer.querySelector('[data-admin-entry]')?.href==='login.html?next=upload','signed-out administrator entry returns through sign-in');
+    await footer.querySelector('[data-open-help]').click();
+    ok(view.$('#help-dialog').open,'footer guidance opens the working help dialog');
+  }
+  const navigation=environment('index.html');navigation.boot();navigation.context.location.hash='#library';await navigation.windowEvent('hashchange');
+  ok(navigation.document.activeElement===navigation.$('#main-content')&&navigation.context.scrollPosition.top===0,'footer navigation reveals the destination and moves keyboard focus to its content');
+  const admin=environment('index.html',1440,{hsu_token:'test-only-session'});admin.boot();
+  ok(admin.$('[data-admin-entry]').href==='upload.html','signed-in administrator entry leads to the existing protected tools');
+  ok(admin.$('[data-admin-entry]').textContent==='관리자 도구','administrator entry identifies the tools clearly');
+}
 (async()=>{
+  if(process.argv.includes('--navigation-only')){await checkFooterNavigation();console.log('Footer navigation: PASS');return;}
+  await checkFooterNavigation();
   if(process.argv.includes('--animation-only')){await checkAnimatedExamples();console.log('Animated examples: PASS');return;}
   await checkLanguageSwitch();await checkAnimatedExamples();
   if(process.argv.includes('--feedback-only')){console.log('Language switch and animated examples: PASS');return;}
