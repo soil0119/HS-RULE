@@ -105,6 +105,7 @@
   }
   function updateAccount() {
     $$('[data-account]').forEach(link => { $('span', link).textContent = t(API.authenticated() ? page === 'upload' ? 'logout' : 'account' : 'login'); link.href = route(API.authenticated() && page !== 'upload' ? 'upload' : 'login'); });
+    $$('[data-admin-entry]').forEach(link => { $('span', link).textContent = t(API.authenticated() ? 'account' : 'adminLogin'); link.href = API.authenticated() ? route('upload') : route('login') + '?next=upload'; });
   }
   function setupShell() {
     $$('[data-route]').forEach(link => { link.href = route(link.dataset.route) + (link.dataset.next ? `?next=${encodeURIComponent(link.dataset.next)}` : ''); });
@@ -183,7 +184,7 @@
           if (data.followups.length) { const block = node('section', 'followups'); block.append(node('h3', '', t('followups'))); data.followups.forEach((value, number) => { const control = button(value, 'followup-button', () => fillQuestion(value), `followup-${index}-${number}`); control.append(icon('arrow-up-right')); block.append(control); }); answer.append(block); }
         } target.append(answer);
       });
-      const last = turns.at(-1), hasAnswer = last?.status === 'answer'; $('#references').hidden = !hasAnswer; $('#ask-info').hidden = hasAnswer; $('#ask-grid').classList.toggle('with-sources', hasAnswer); if (hasAnswer) renderReferences(last.response);
+      const last = turns.at(-1), hasAnswer = last?.status === 'answer'; $('#references').hidden = !hasAnswer; $('#ask-grid').classList.toggle('with-sources', hasAnswer); if (hasAnswer) renderReferences(last.response);
     }
     function renderReferences(data) {
       const target = $('#references-content'); target.replaceChildren(); $('#references-count').textContent = t('referencesCount', { count: data.sources.length });
