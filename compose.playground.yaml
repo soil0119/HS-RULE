@@ -1,0 +1,15 @@
+# Independent from compose.yaml: no database or model download is started.
+name: hs-rule-playground
+services:
+  playground:
+    build: ./tools/rag-playground
+    ports:
+      - "127.0.0.1:${PLAYGROUND_PORT:-8788}:8080"
+    environment:
+      HSRULE_API_URL: ${HSRULE_API_URL:-http://host.docker.internal:8080}
+      HSRULE_BROWSER_API_URL: ${HSRULE_BROWSER_API_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
