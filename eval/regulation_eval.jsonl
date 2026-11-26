@@ -1,17 +1,40 @@
-{"id": "exact-32", "type": "exact_article", "language": "ko", "question": "제32조 성적분류는 어떻게 되나요?", "expected_articles": ["제32조"]}
-{"id": "exact-3-2", "type": "exact_article", "language": "ko", "question": "제3조의2 계약학과는 무엇인가요?", "expected_articles": ["제3조의2"]}
-{"id": "keyword-early-grad", "type": "keyword", "language": "ko", "question": "조기졸업은 몇 학기 만에 할 수 있나요?", "expected_articles": ["제40조"]}
-{"id": "short-early-grad", "type": "short_query", "language": "ko", "question": "조기졸업", "expected_articles": ["제40조"]}
-{"id": "short-credit", "type": "short_query", "language": "ko", "question": "졸업학점", "expected_articles": ["제34조"]}
-{"id": "wrong-name-early-grad", "type": "wrong_regulation_name", "language": "ko", "question": "한성대 학사운영규정에 조기졸업 요건이 어떻게 되어 있나요?", "expected_articles": ["제40조"]}
-{"id": "wrong-name-grade", "type": "wrong_regulation_name", "language": "ko", "question": "성적처리지침에서 A+ 기준이 뭔가요?", "expected_articles": ["제32조"]}
-{"id": "synonym-grade-point", "type": "synonym", "language": "ko", "question": "과목 성적이 몇 점이면 평점이 3.5인가요?", "expected_articles": ["제32조"]}
-{"id": "table-a-plus", "type": "table", "language": "ko", "question": "A+ 학점은 몇 점 구간이고 평점은 얼마인가요?", "expected_articles": ["제32조"]}
-{"id": "cross-ref-3", "type": "cross_reference", "language": "ko", "question": "입학정원이 참조하는 별표는 무엇인가요?", "expected_articles": ["제3조"]}
-{"id": "addendum-2025", "type": "addendum", "language": "ko", "question": "글로벌인재대학 승격은 언제부터 적용되나요?", "expected_articles": ["부칙(2025.4.11.공포)제2조"]}
-{"id": "followup-grad", "type": "followup", "language": "ko", "history": [{"role": "user", "content": "조기졸업 조건이 뭐예요?"}, {"role": "assistant", "content": "7학기에 전 과정을 이수하고 평점평균 4.0 이상이어야 합니다."}], "question": "그럼 학석사연계과정생은요?", "expected_articles": ["제40조"]}
-{"id": "english-early-grad", "type": "english", "language": "en", "question": "After how many semesters can I graduate early?", "expected_articles": ["제40조"]}
-{"id": "english-grade-table", "type": "english", "language": "en", "question": "What score range gives an A+ grade?", "expected_articles": ["제32조"]}
-{"id": "no-evidence-cafeteria", "type": "no_evidence", "language": "ko", "question": "학생식당 운영 시간은 어떻게 되나요?", "expected_found": false}
-{"id": "no-evidence-parking", "type": "no_evidence", "language": "ko", "question": "교내 주차 요금은 얼마인가요?", "expected_found": false}
-{"id": "deleted-17", "type": "deleted_regression", "language": "ko", "question": "제17조 입학생 등록 및 구비서류는 무엇인가요?", "expect_absent_articles": ["제17조"]}
+{"id": "exact-32", "type": "exact_article", "language": "ko", "question": "제32조 성적분류는 어떻게 되나요?", "expected_articles": ["제32조"], "split": "tune"}
+{"id": "exact-3-2", "type": "exact_article", "language": "ko", "question": "제3조의2 계약학과는 무엇인가요?", "expected_articles": ["제3조의2"], "split": "tune"}
+{"id": "keyword-early-grad", "type": "keyword", "language": "ko", "question": "조기졸업은 몇 학기 만에 할 수 있나요?", "expected_articles": ["제40조"], "split": "tune"}
+{"id": "short-early-grad", "type": "short_query", "language": "ko", "question": "조기졸업", "expected_articles": ["제40조"], "split": "tune"}
+{"id": "short-credit", "type": "short_query", "language": "ko", "question": "졸업학점", "expected_articles": ["제34조"], "split": "tune"}
+{"id": "wrong-name-early-grad", "type": "wrong_regulation_name", "language": "ko", "question": "한성대 학사운영규정에 조기졸업 요건이 어떻게 되어 있나요?", "expected_articles": ["제40조"], "split": "tune"}
+{"id": "wrong-name-grade", "type": "wrong_regulation_name", "language": "ko", "question": "성적처리지침에서 A+ 기준이 뭔가요?", "expected_articles": ["제32조"], "split": "holdout"}
+{"id": "synonym-grade-point", "type": "synonym", "language": "ko", "question": "과목 성적이 몇 점이면 평점이 3.5인가요?", "expected_articles": ["제32조"], "split": "tune"}
+{"id": "table-a-plus", "type": "table", "language": "ko", "question": "A+ 학점은 몇 점 구간이고 평점은 얼마인가요?", "expected_articles": ["제32조"], "split": "holdout"}
+{"id": "cross-ref-3", "type": "cross_reference", "language": "ko", "question": "입학정원이 참조하는 별표는 무엇인가요?", "expected_articles": ["제3조"], "split": "tune"}
+{"id": "addendum-2025", "type": "addendum", "language": "ko", "question": "글로벌인재대학 승격은 언제부터 적용되나요?", "expected_articles": ["부칙(2025.4.11.공포)제2조"], "split": "tune"}
+{"id": "followup-grad", "type": "followup", "language": "ko", "history": [{"role": "user", "content": "조기졸업 조건이 뭐예요?"}, {"role": "assistant", "content": "7학기에 전 과정을 이수하고 평점평균 4.0 이상이어야 합니다."}], "question": "그럼 학석사연계과정생은요?", "expected_articles": ["제40조"], "split": "tune"}
+{"id": "english-early-grad", "type": "english", "language": "en", "question": "After how many semesters can I graduate early?", "expected_articles": ["제40조"], "split": "tune"}
+{"id": "english-grade-table", "type": "english", "language": "en", "question": "What score range gives an A+ grade?", "expected_articles": ["제32조"], "split": "holdout"}
+{"id": "no-evidence-cafeteria", "type": "no_evidence", "language": "ko", "question": "학생식당 운영 시간은 어떻게 되나요?", "expected_found": false, "split": "tune"}
+{"id": "no-evidence-parking", "type": "no_evidence", "language": "ko", "question": "교내 주차 요금은 얼마인가요?", "expected_found": false, "split": "holdout"}
+{"id": "deleted-17", "type": "deleted_regression", "language": "ko", "question": "제17조 입학생 등록 및 구비서류는 무엇인가요?", "expect_absent_articles": ["제17조"], "split": "tune"}
+{"id": "admission-credit-2014", "type": "admission_year", "split": "tune", "language": "ko", "question": "2014학번인데 졸업하려면 몇 학점이 필요한가요?", "expected_articles": ["부칙(2016.2.3공포)제2조", "제34조"], "required_articles": ["부칙(2016.2.3공포)제2조"], "expected_clarification": false}
+{"id": "admission-maxcredit-2013", "type": "admission_year", "split": "holdout", "language": "ko", "question": "2013학년도 입학생은 한 학기에 최대 몇 학점까지 신청할 수 있나요?", "expected_articles": ["부칙(2016.2.3공포)제2조", "제33조"], "required_articles": ["부칙(2016.2.3공포)제2조"], "expected_clarification": false}
+{"id": "condition-credit", "type": "needs_condition", "split": "tune", "language": "ko", "question": "졸업하려면 몇 학점을 들어야 하나요?", "expected_articles": ["제34조", "부칙(2016.2.3공포)제2조"], "expected_clarification": true}
+{"id": "condition-maxcredit", "type": "needs_condition", "split": "holdout", "language": "ko", "question": "한 학기에 최대 몇 학점까지 들을 수 있어요?", "expected_articles": ["제33조", "부칙(2016.2.3공포)제2조"], "expected_clarification": true}
+{"id": "program-early-grad", "type": "program", "split": "tune", "language": "ko", "question": "학석사연계과정생은 조기졸업 평점 기준이 몇 점인가요?", "expected_articles": ["제40조"], "expected_clarification": false}
+{"id": "program-stated-early-grad", "type": "program", "split": "holdout", "language": "ko", "question": "저는 일반 학부생인데 조기졸업하려면 평점이 몇 이상이어야 하나요?", "expected_articles": ["제40조"], "expected_clarification": false}
+{"id": "synonym-excess-credit", "type": "synonym", "split": "tune", "language": "ko", "question": "성적이 좋으면 학점을 더 신청할 수 있나요?", "expected_articles": ["제33조"]}
+{"id": "keyword-credit-range", "type": "keyword", "split": "holdout", "language": "ko", "question": "학기마다 몇 학점에서 몇 학점까지 듣나요?", "expected_articles": ["제33조"]}
+{"id": "synonym-pass-fail", "type": "synonym", "split": "tune", "language": "ko", "question": "P/NP 과목은 평점 계산에 들어가나요?", "expected_articles": ["제32조"]}
+{"id": "synonym-fail-grade", "type": "synonym", "split": "holdout", "language": "ko", "question": "F 받으면 낙제인가요?", "expected_articles": ["제32조"]}
+{"id": "keyword-summer-session", "type": "keyword", "split": "tune", "language": "ko", "question": "계절학기는 몇 번까지 들어도 조기졸업할 수 있나요?", "expected_articles": ["제40조"]}
+{"id": "addendum-effective-2016", "type": "addendum", "split": "tune", "language": "ko", "question": "졸업학점 130학점 규정은 언제부터 시행됐나요?", "expected_articles": ["부칙(2016.2.3공포)제1조", "제34조"], "required_articles": ["부칙(2016.2.3공포)제1조"]}
+{"id": "addendum-dept-name", "type": "addendum", "split": "holdout", "language": "ko", "question": "AI·소프트웨어학과 명칭 변경은 언제부터 적용되나요?", "expected_articles": ["부칙(2025.4.11.공포)제2조"]}
+{"id": "addendum-original", "type": "addendum", "split": "holdout", "language": "ko", "question": "학칙은 처음 언제부터 시행됐나요?", "expected_articles": ["부칙#1"]}
+{"id": "table-school-company", "type": "table", "split": "tune", "language": "ko", "question": "학교기업 케이키친한상은 어느 학과와 관련 있나요?", "expected_articles": ["제5조의4"]}
+{"id": "table-school-company-business", "type": "table", "split": "holdout", "language": "ko", "question": "학교기업의 사업종목은 무엇인가요?", "expected_articles": ["제5조의4"]}
+{"id": "english-credit-admission", "type": "english", "split": "holdout", "language": "en", "question": "I was admitted in 2014. How many credits do I need to graduate?", "expected_articles": ["부칙(2016.2.3공포)제2조", "제34조"], "required_articles": ["부칙(2016.2.3공포)제2조"], "expected_clarification": false}
+{"id": "english-max-credit", "type": "english", "split": "tune", "language": "en", "question": "What is the maximum number of credits per semester?", "expected_articles": ["제33조", "부칙(2016.2.3공포)제2조"]}
+{"id": "english-article-34", "type": "english", "split": "tune", "language": "en", "question": "What does Article 34 say?", "expected_articles": ["제34조"]}
+{"id": "english-no-evidence", "type": "no_evidence", "split": "holdout", "language": "en", "question": "What time does the campus shuttle bus run?", "expected_found": false}
+{"id": "no-evidence-shuttle", "type": "no_evidence", "split": "tune", "language": "ko", "question": "통학버스 시간표는 어떻게 되나요?", "expected_found": false}
+{"id": "followup-condition", "type": "followup", "split": "tune", "language": "ko", "history": [{"role": "user", "content": "졸업하려면 몇 학점 필요해요?"}, {"role": "assistant", "content": "2016학년도 이후 입학생은 130학점 이상입니다(제34조). 입학년도에 따라 다를 수 있습니다."}], "question": "저는 2014학번이에요", "expected_articles": ["부칙(2016.2.3공포)제2조", "제34조"], "required_articles": ["부칙(2016.2.3공포)제2조"], "expected_clarification": false}
+{"id": "followup-article", "type": "followup", "split": "holdout", "language": "ko", "history": [{"role": "user", "content": "제33조 내용 알려줘"}, {"role": "assistant", "content": "학기별 6학점에서 18학점까지 취득이 원칙입니다(제33조)."}], "question": "거기서 초과 이수하려면 조건이 뭐예요?", "expected_articles": ["제33조"]}

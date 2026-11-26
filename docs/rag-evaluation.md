@@ -2,13 +2,16 @@
 
 ## 구성
 
-- 검색·답변 평가셋: `eval/regulation_eval.jsonl` 17건. 한성대학교 학칙 공식 본문 발췌(`tests/fixtures/hansung_rules_excerpt.txt`)가 정답 근거다. 유형은 정확 조항(2), 키워드, 짧은 질문(2), 부정확한 규정명(2), 동의어, 표, 교차 참조, 부칙, 후속 질문, 영어 질문(2), 근거 없음(2), 삭제 조항 회귀다. 정답 규정·개정·조항·공식 URL은 `expected_articles`, 실행 시 색인한 개정 ID, 각 근거의 `official_url`로 대조한다.
+- 검색·답변 평가셋: `eval/regulation_eval.jsonl` 40건(조정용 `tune` 25, 최종 확인용 `holdout` 15). 한성대학교 학칙 공식 본문 발췌(`tests/fixtures/hansung_rules_excerpt.txt`)가 정답 근거다. 유형은 정확 조항, 키워드, 짧은 질문, 부정확한 규정명, 동의어, 표, 교차 참조, 부칙(시행일·적용례), 입학년도별 경과조치(`admission_year`), 조건이 빠져 되물어야 하는 질문(`needs_condition`), 과정별 기준(`program`), 후속 질문(조건·조 번호 유지), 영어 질문, 근거 없음, 삭제 조항 회귀다. 근거 없음 사례는 이 발췌본 기준이므로 평가 말뭉치를 실제 스냅샷으로 바꾸면 다시 검수한다. 정답 규정·개정·조항·공식 URL은 `expected_articles`, 실행 시 색인한 개정 ID, 각 근거의 `official_url`로 대조한다.
 - 충돌 분석 평가셋: `eval/conflict_cases.jsonl` 5건(충돌 2, 규정 준수 1, 무관 1, 긴 문서 1). #29의 분석 품질 평가를 여기서 측정한다.
 - 실행기: `scripts/run_rag_eval.py --mode standin|real`. 결과는 `eval/results/<시각>-<모드>.json`에 쌓인다.
 - 기록 항목: Recall@1/3/5, MRR(결합·키워드 단독·벡터 단독), 삭제 조항 회귀, 검색 지연 p50/p95, 검색 상한(`retrieval_limits`), 회귀 점검(`regressions`), 충돌 분석 후보 재현율. `real` 모드는 추가로 인용 조항·청크·개정·URL 일치, 무근거 답변률, 올바른 거절률, 답변 지연, 오류 수, 충돌 지적과 정답 비교, 권고의 근거 유무를 기록한다.
 - 회귀 점검(`regressions`)은 모델 없이 결정적으로 돌아가며 공개/비공개 누출, 새 개정 제공과 구개정 차단, 삭제 조항 제외, 색인 실패 거부, 후보에 없는 인용 거부를 확인한다.
 - `standin` 모드는 측정할 수 없는 사례(후속 질문·영어 질의)를 `skipped`에 사유와 함께 남기고 지표에서 제외한다. 실패로 기록하지 않는다.
-- 버전 기록: git 커밋, 코퍼스·평가셋 SHA-256, 임베딩 모델, 토크나이저, 청킹 설정, 프롬프트 코드 SHA-256, Groq 모델 ID.
+- 버전 기록: git 커밋, 코퍼스·평가셋 SHA-256, 평가한 분할(`eval_split`), 임베딩 모델, 토크나이저, 청킹 설정, 프롬프트 코드 SHA-256, LLM 제공자·모델 ID.
+- 분할(#77): 설정을 조정하며 볼 때는 `--split tune`만 쓰고, 최종 판정은 `--split holdout`으로 한 번 확인한다. 결과의 `retrieval.by_split`, `answers.by_split`로 두 묶음을 나눠 보고, `retrieval.by_type`과 `retrieval.misses`(정답이 5위 안에 없던 사례와 대신 나온 상위 조항)로 실패를 분류한다.
+- `required_articles`가 있는 사례의 검색 순위는 필요한 조항이 모두 나온 순위다. 예: 2014학번 졸업학점 질문은 본칙 제34조만 찾으면 실패이고 부칙 경과조치까지 찾아야 성공이다.
+- 조건 되묻기·수치 근거(#78): `expected_clarification`이 true인 사례에서 되물은 비율(`answers.summary.clarification.asked_when_needed`), false인 사례에서 불필요하게 되물은 비율(`unnecessary_rate`), 근거를 찾은 답변 중 수치 검사 통과 비율과 고쳐 쓰기 수(`grounding`)를 기록한다. 답변 결과에 해당 필드가 없는 버전이면 측정하지 않음(None)으로 남는다.
 - `expected_articles`는 인용으로 허용하는 조항 목록이고, 선택 항목 `required_articles`는 반드시 함께 인용해야 하는 조항이다. 허용 목록 밖 조항을 인용하면 인용 일치가 아니다. 사례 하나의 모델 오류·시간 초과는 그 사례의 `error`와 `seconds`로 남고 나머지 사례는 계속 평가한다. 요약의 `denominators`와 `errors`로 집계 분모를 확인한다.
 - 수치는 실행기가 계산한 값만 결과 파일에 적고, 이 문서에는 옮기지 않는다. 측정하지 못한 항목은 결과의 `not_measured`에 사유와 함께 남는다.
 

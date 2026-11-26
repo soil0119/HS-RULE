@@ -45,6 +45,17 @@ def first_rank(article_ids, expected):
     return None
 
 
+def case_rank(article_ids, expected, required=None):
+    """검색 순위. required가 있으면 필요한 조항이 모두 나온 순위(가장 늦은 것), 하나라도 없으면 None(#77).
+
+    예: 2014학번 졸업학점 질문은 본칙 제34조만 찾으면 실패이고 부칙 경과조치까지 찾아야 성공이다.
+    """
+    if not required:
+        return first_rank(article_ids, expected)
+    ranks = [first_rank(article_ids, {article}) for article in required]
+    return None if None in ranks else max(ranks)
+
+
 def citation_matches(cited, expected, required=None) -> bool:
     """인용 성공 판정(#59). 인용한 조항이 모두 허용 목록(expected) 안에 있고 하나 이상이어야 한다.
 
@@ -199,14 +210,21 @@ def evaluate_answers(cases, answerer, regulations) -> dict:
         sources = (result or {}).get("sources", [])
         cited = [s["article_id"] for s in sources]
         expected = case.get("expected_articles")
-        rows.append({"id": case["id"], "type": case["type"], "error": error, "seconds": round(seconds, 3),
+        clarification = (result or {}).get("clarification") or {}
+        grounding = (result or {}).get("grounding") or {}
+        rows.append({"id": case["id"], "type": case["type"], "split": case.get("split"),
+                     "error": error, "seconds": round(seconds, 3),
+                     "clarification_asked": clarification.get("needed") if result is not None else None,
+                     "expected_clarification": case.get("expected_clarification"),
+                     "grounding_verified": grounding.get("verified") if result is not None else None,
+                     "grounding_repaired": grounding.get("repaired") if result is not None else None,
                      "found": None if result is None else result["found"], "cited": cited,
                      "cited_chunks": [s["chunk_id"] for s in sources],
                      "citation_match": citation_matches(cited, expected, case.get("required_articles")),
                      "expected_found": case.get("expected_found", bool(expected)),
                      "url_ok": all(str(s.get("url", "")).startswith("http") for s in sources),
                      "revision_match": all(s["revision_id"] in known_revisions for s in sources)})
-    return {"summary": summarize_answers(rows), "cases": rows}
+    return {"summary": summarize_answers(rows), "by_split": split_summaries(rows, summarize_answers), "cases": rows}
 
 
 def summarize_answers(rows) -> dict:
@@ -230,7 +248,42 @@ def summarize_answers(rows) -> dict:
         if unanswerable_done else None,
         "correct_refusal_rate": (sum(1 for r in unanswerable_done if r["found"] is False) / len(unanswerable))
         if unanswerable else None,
-        "latency_seconds": {"p50": percentile(seconds, .5), "p95": percentile(seconds, .95)}}
+        "latency_seconds": {"p50": percentile(seconds, .5), "p95": percentile(seconds, .95)},
+        "clarification": summarize_clarification(completed),
+        "grounding": summarize_grounding(found)}
+
+
+def summarize_clarification(completed) -> dict:
+    """조건 되묻기(#78). 기대 사례 중 물어본 비율과, 묻지 않아야 할 사례에서 불필요하게 물은 비율.
+
+    답변 결과에 clarification 필드가 없으면(기능 이전 버전) 측정하지 않는다(None).
+    """
+    measured = [r for r in completed if r["clarification_asked"] is not None]
+    if not measured:
+        return {"measured": 0, "asked_when_needed": None, "unnecessary_rate": None}
+    needed = [r for r in measured if r["expected_clarification"] is True]
+    not_needed = [r for r in measured if r["expected_clarification"] is False]
+    return {"measured": len(measured),
+            "asked_when_needed": (sum(r["clarification_asked"] for r in needed) / len(needed)) if needed else None,
+            "unnecessary_rate": (sum(r["clarification_asked"] for r in not_needed) / len(not_needed))
+            if not_needed else None,
+            "denominators": {"needed": len(needed), "not_needed": len(not_needed)}}
+
+
+def summarize_grounding(found) -> dict:
+    """근거를 찾았다고 답한 사례 중 수치 근거 검사를 통과한 비율과 고쳐 쓰기 횟수(#78)."""
+    measured = [r for r in found if r["grounding_verified"] is not None]
+    if not measured:
+        return {"measured": 0, "verified_rate": None, "repaired": None}
+    return {"measured": len(measured),
+            "verified_rate": sum(1 for r in measured if r["grounding_verified"]) / len(measured),
+            "repaired": sum(1 for r in measured if r["grounding_repaired"])}
+
+
+def split_summaries(rows, summarize) -> dict:
+    """조정용(tune)과 최종 확인용(holdout) 사례를 나눠 집계한다(#77). 같은 질문에만 맞춘 개선을 가려낸다."""
+    splits = sorted({r.get("split") or "unspecified" for r in rows})
+    return {split: summarize([r for r in rows if (r.get("split") or "unspecified") == split]) for split in splits}
 
 
 def load_regulations(args):
@@ -248,6 +301,8 @@ def main():
     parser.add_argument("--eval", default=str(ROOT / "eval/regulation_eval.jsonl"))
     parser.add_argument("--conflict-eval", default=str(ROOT / "eval/conflict_cases.jsonl"))
     parser.add_argument("--out", default=str(ROOT / "eval/results"))
+    parser.add_argument("--split", choices=("all", "tune", "holdout"), default="all",
+                        help="평가할 사례 묶음(#77). 조정 중에는 tune만, 최종 판정은 holdout으로 확인한다.")
     args = parser.parse_args()
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -255,6 +310,8 @@ def main():
 
     regulations = load_regulations(args)
     cases = [json.loads(line) for line in Path(args.eval).read_text(encoding="utf-8").splitlines() if line.strip()]
+    if args.split != "all":
+        cases = [case for case in cases if case.get("split") == args.split]
     corpus_text = "".join(r["text"] for r in regulations)
     if args.mode == "standin":
         from tests.fakes import FakeEmbeddings
@@ -293,14 +350,16 @@ def main():
         if expected:
             wrong_url = [h["official_url"] for h in hits
                          if h["article_id"] in expected and not h["official_url"].startswith("http")]
-            rows["hybrid"].append({"id": case["id"], "type": case["type"], "rank": first_rank(ids, expected),
+            rows["hybrid"].append({"id": case["id"], "type": case["type"], "split": case.get("split"),
+                                   "rank": case_rank(ids, expected, case.get("required_articles")), "top": ids[:3],
                                    "revision": next((h["revision_id"] for h in hits
                                                      if h["article_id"] in expected), None),
                                    "url_ok": not wrong_url})
             keyword = repository.keyword_candidates(query_terms(case["question"]), limit=max(KS))
             vector = repository.vector_candidates(embeddings.embed_query(case["question"]), limit=max(KS))
-            rows["keyword_only"].append({"rank": first_rank([h["article_id"] for h in keyword], expected)})
-            rows["vector_only"].append({"rank": first_rank([h["article_id"] for h in vector], expected)})
+            required = case.get("required_articles")
+            rows["keyword_only"].append({"rank": case_rank([h["article_id"] for h in keyword], expected, required)})
+            rows["vector_only"].append({"rank": case_rank([h["article_id"] for h in vector], expected, required)})
 
     regressions = run_regressions(repository, embeddings, retriever, regulations)
     stage_errors = []
@@ -332,6 +391,7 @@ def main():
             "corpus_sha256": hashlib.sha256(corpus_text.encode("utf-8")).hexdigest(),
             "corpus_revisions": [r["revision_id"] for r in regulations],
             "eval_set_sha256": hashlib.sha256(Path(args.eval).read_bytes()).hexdigest(), "eval_cases": len(cases),
+            "eval_split": args.split,
             "embedding_model": embeddings.model_name, "chunk_params": {"max_tokens": 128, "overlap_tokens": 16},
             "tokenizer": type(embeddings.tokenizer).__name__ if args.mode == "standin" else embeddings.model_name,
             "llm_provider": settings.provider if settings else None,
@@ -340,6 +400,12 @@ def main():
                                             Path(ROOT / "hsrule/answering.py").read_bytes()).hexdigest()},
         "retrieval": {"hybrid": retrieval_metrics(rows["hybrid"]), "keyword_only": retrieval_metrics(rows["keyword_only"]),
                       "vector_only": retrieval_metrics(rows["vector_only"]),
+                      "by_split": split_summaries(rows["hybrid"], retrieval_metrics),
+                      "by_type": {t: retrieval_metrics([r for r in rows["hybrid"] if r["type"] == t])
+                                  for t in sorted({r["type"] for r in rows["hybrid"]})},
+                      # 실패 분류용(#77): 정답이 5위 안에 없던 사례와 대신 나온 상위 조항
+                      "misses": [{"id": r["id"], "type": r["type"], "split": r["split"], "rank": r["rank"],
+                                  "top": r["top"]} for r in rows["hybrid"] if not r["rank"] or r["rank"] > max(KS)],
                       "per_case": rows["hybrid"], "skipped": skipped,
                       "deleted_article_regressions": absent_failures,
                       "search_latency_seconds": {"p50": percentile(latencies, .5), "p95": percentile(latencies, .95)}},
