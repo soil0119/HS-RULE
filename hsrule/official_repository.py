@@ -125,7 +125,7 @@ class OfficialRepository:
                          chunk["source_end"], chunk["content"], chunk["embedding_text"],
                          normalize_search_text(chunk["content"]),
                          Json(chunk["references"]), chunk["deleted"], visibility, make_current,
-                         vector_literal(vector)))
+                         vector_literal(vector), chunk.get("source_id", "")))
         with self.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (revision["regulation_id"],))
             self._enforce_meta(cursor, revision)
@@ -149,9 +149,9 @@ class OfficialRepository:
             execute_values(cursor, """
                 INSERT INTO hs_reg_chunks (id, revision_id, ordinal, regulation_id, article_id, kind, chapter,
                     source_start, source_end, content, embedding_text, search_text, refs, deleted, visibility,
-                    searchable, embedding)
+                    searchable, embedding, source_article_id)
                 VALUES %s
-            """, rows, template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)")
+            """, rows, template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s)")
             return saved
 
     def delete_revision(self, revision_id: str) -> bool:
@@ -204,7 +204,8 @@ class OfficialRepository:
     # 조건은 모두 hs_reg_chunks의 열이므로 부분 인덱스 스캔 단계에서 적용되고 LIMIT 이후로 밀리지 않는다.
     _CANDIDATE = """
         c.id, c.revision_id, c.regulation_id, r.title, r.official_url, c.article_id, c.kind, c.chapter,
-        c.content, c.source_start, c.source_end, c.refs, c.deleted, c.visibility, r.is_current
+        c.content, c.source_start, c.source_end, c.refs, c.deleted, c.visibility, r.is_current,
+        c.source_article_id
     """
     SEARCH_TIMEOUT_MS = 5_000
     EF_SEARCH = 200
@@ -310,7 +311,7 @@ class OfficialRepository:
     def chunks_of(self, revision_id: str) -> list[dict]:
         with self.cursor() as cursor:
             cursor.execute("SELECT id, ordinal, article_id, kind, source_start, source_end, content, "
-                           "visibility, searchable, deleted "
+                           "visibility, searchable, deleted, source_article_id "
                            "FROM hs_reg_chunks WHERE revision_id = %s ORDER BY ordinal", (revision_id,))
             return cursor.fetchall()
 
