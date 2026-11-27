@@ -25,6 +25,8 @@ MAX_BACKOFF_SECONDS = 8.0
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 # 요청은 맞았지만 이번 생성 결과를 provider가 해석하지 못한 400. gpt-oss(Groq)에서 가끔 나고 다시 보내면 대개 통과한다.
 GENERATION_FAILURE_CODES = frozenset({"output_parse_failed", "tool_use_failed", "json_validate_failed"})
+# 기본 temperature 0이면 같은 요청이 같은 출력을 내므로, 생성 실패 뒤에는 샘플링을 조금 바꿔 다시 보낸다.
+GENERATION_RETRY_TEMPERATURE = 0.7
 
 CONDENSE_SYSTEM = (
     "대화 이력과 마지막 질문이 주어진다. 이력 없이도 이해되는 한국어 검색 질문 한 문장으로 바꿔 쓴다. "
@@ -246,6 +248,18 @@ def _error_code(exc) -> str:
     return ""
 
 
+def failed_generation(exc, limit: int = 300) -> str:
+    """Groq가 출력 해석 실패 때 돌려주는 모델 원출력(failed_generation) 앞부분. 진단용으로만 화면에 보인다."""
+    for item in _error_chain(exc):
+        body = getattr(item, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error", body)
+            value = error.get("failed_generation") if isinstance(error, dict) else None
+            if isinstance(value, str):
+                return " ".join(value.split())[:limit]
+    return ""
+
+
 def provider_detail(exc) -> str:
     """사용자에게 보여 줄 provider 오류 요약: HTTP 상태와 오류 코드. 키·원문이 섞일 수 있는 메시지는 쓰지 않는다."""
     status, code = _status_code(exc), _error_code(exc)
@@ -306,13 +320,15 @@ def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int =
     - 남은 시간을 호출별 timeout으로 넘긴다(provider 자체 재시도는 create_llm에서 끈다).
     - 429·5xx·연결 실패만 남은 시간 안에서 다시 시도한다. 대기(Retry-After 또는 지수 대기)가 마감을 넘기면
       기다리지 않고 원래 오류를 올린다.
+    - provider가 출력을 해석하지 못한 400(output_parse_failed 등)도 다시 시도하되, temperature를 바꿔 보낸다.
     - usage가 주어지면 호출·재시도 수와 provider가 알려 준 입력·출력 토큰을 더한다.
     """
+    model = llm
     for attempt in range(1, attempts + 1):
         left = remaining()
         if left < MIN_CALL_SECONDS:
             raise DeadlineReached("질의에 허용된 시간을 넘겼습니다.")
-        bound = llm.bind(timeout=left) if hasattr(llm, "bind") else llm
+        bound = model.bind(timeout=left) if hasattr(model, "bind") else model
         if usage is not None:
             usage["calls"] += 1
         try:
@@ -327,6 +343,8 @@ def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int =
                 raise
             if usage is not None:
                 usage["retries"] += 1
+            if is_generation_failure(exc) and hasattr(llm, "bind"):
+                model = llm.bind(temperature=GENERATION_RETRY_TEMPERATURE)
             sleep(wait)
             continue
         if usage is not None:

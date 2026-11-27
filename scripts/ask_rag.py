@@ -25,11 +25,10 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_REGULATION = {"regulation_id": "20", "revision_id": "20:1623", "title": "한성대학교 학칙",
                       "official_url": "https://rule.hansung.ac.kr/lmxsrv/law/lawFullContent.do?SEQ=20&SEQ_HISTORY=1623"}
+# 오류 메시지(무엇이 실패했는지)에 덧붙이는 조치 안내. 한도·시간 초과 메시지는 그 자체로 조치를 담고 있다.
 REASONS = {
-    "timeout": "시간 안에 응답하지 않았습니다.",
-    "rate_limit": "모델 호출 한도(무료 한도)를 넘었습니다. 잠시 뒤 다시 시도하세요.",
-    "provider": "모델 호출에 실패했습니다. 키·모델 ID·네트워크를 확인하세요.",
-    "json": "모델이 정해진 형식으로 답하지 않았습니다(다시 시도 후에도 실패). 같은 질문을 한 번 더 해 보세요.",
+    "provider": "키·모델 ID·네트워크를 확인하세요.",
+    "json": "같은 질문을 한 번 더 해 보세요.",
 }
 
 
@@ -68,7 +67,8 @@ def format_result(result: dict, seconds: float) -> str:
     return "\n".join(lines)
 
 
-def run_session(answerer, questions, out, *, language="ko", include_private=False, log=None, meta=None):
+def run_session(answerer, questions, out, *, language="ko", include_private=False, log=None, meta=None,
+                debug=False):
     """질문을 차례로 처리한다. 대화 이력을 이어 가며, 오류가 나도 다음 질문을 계속 받는다."""
     from hsrule.answering import RagError
 
@@ -102,7 +102,14 @@ def run_session(answerer, questions, out, *, language="ko", include_private=Fals
 
             seconds = time.perf_counter() - started
             detail = provider_detail(exc.__cause__) if exc.__cause__ is not None else ""
-            print(f"오류({exc.reason}{f', {detail}' if detail else ''}): {REASONS.get(exc.reason, str(exc))}", file=out)
+            hint = REASONS.get(exc.reason, "")
+            print(f"오류({exc.reason}{f', {detail}' if detail else ''}): {exc}{f' {hint}' if hint else ''}", file=out)
+            if debug and exc.__cause__ is not None:
+                from hsrule.chains import failed_generation
+
+                excerpt = failed_generation(exc.__cause__)
+                if excerpt:
+                    print(f"  [debug] 모델 원출력 앞부분: {excerpt!r}", file=out)
             record.update(error={"code": exc.code, "reason": exc.reason, "detail": detail}, seconds=round(seconds, 3))
         except ValueError as exc:
             print(f"입력 오류: {exc}", file=out)
@@ -210,6 +217,8 @@ def main(argv=None) -> int:
     parser.add_argument("--ping", action="store_true", help="키·모델 연결만 확인하고 끝낸다")
     parser.add_argument("--no-ping", action="store_true", help="시작할 때 연결 확인 호출을 하지 않는다")
     parser.add_argument("--env-file", default=str(ROOT / ".env"), help="읽을 .env 파일(기본: 저장소 최상위)")
+    parser.add_argument("--debug", action="store_true",
+                        help="모델 출력 해석 실패 때 Groq가 돌려준 모델 원출력 앞부분을 화면에 보인다(로그에는 남기지 않음)")
     parser.add_argument("--rebuild", action="store_true",
                         help="RAG 색인(hs_reg_*)을 비우고 다시 색인한다. 웹 문서 테이블은 건드리지 않는다")
     args = parser.parse_args(argv)
@@ -277,7 +286,7 @@ def main(argv=None) -> int:
     print(f"모델 {settings.provider}/{settings.model} · 임베딩 {embeddings.model_name} · 데이터 {corpus}")
     if args.question:
         run_session(answerer, [args.question], sys.stdout, language=args.language, include_private=args.private,
-                    log=args.log, meta=meta)
+                    log=args.log, meta=meta, debug=args.debug)
         return 0
     print("질문을 입력하세요. /new 새 대화, /en·/ko 언어, /private 비공개 포함, /quit 종료")
 
@@ -289,7 +298,7 @@ def main(argv=None) -> int:
                 return
 
     run_session(answerer, prompts(), sys.stdout, language=args.language, include_private=args.private,
-                log=args.log, meta=meta)
+                log=args.log, meta=meta, debug=args.debug)
     return 0
 
 

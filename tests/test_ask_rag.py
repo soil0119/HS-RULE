@@ -96,7 +96,7 @@ class SessionTests(unittest.TestCase):
 
         out = io.StringIO()
         ask_rag.run_session(Failing(), ["첫 질문", "둘째 질문"], out)
-        self.assertIn("오류(rate_limit): 모델 호출 한도", out.getvalue())
+        self.assertIn("오류(rate_limit): x", out.getvalue())
         self.assertIn("근거를 찾지 못함 (no_evidence)", out.getvalue())
 
     def test_missing_configuration_exits_with_a_clear_message(self):
@@ -240,6 +240,23 @@ class DemoFindingsTests(unittest.TestCase):
         ask_rag.run_session(answerer, ["졸업학점은?"], out)
         self.assertIn("오류(json, HTTP 400, output_parse_failed)", out.getvalue())
         self.assertIn("한 번 더", out.getvalue())
+
+    def test_generation_retry_changes_temperature_and_debug_shows_output(self):
+        clock = FakeClock()
+        failure = GroqStatusError(400, "output_parse_failed")
+        failure.body["error"]["failed_generation"] = "We need to answer in English.\n<|channel|>broken"
+        model = scripted(clock, *[("raise", failure, 0)] * 3)
+        answerer = CitedAnswerer(model, StubSearcher([CREDIT_MAIN]))
+        answerer.chain.clock = clock
+        out = io.StringIO()
+        ask_rag.run_session(answerer, ["졸업학점은?"], out, debug=True)
+        self.assertEqual([call["temperature"] for call in model.calls], [None, 0.7, 0.7])
+        self.assertIn("답변 모델의 출력 형식 오류", out.getvalue())
+        self.assertIn("[debug] 모델 원출력 앞부분: 'We need to answer in English. <|channel|>broken'", out.getvalue())
+        quiet = io.StringIO()
+        model.script, model.calls = [("raise", failure, 0)] * 3, []
+        ask_rag.run_session(answerer, ["졸업학점은?"], quiet)
+        self.assertNotIn("[debug]", quiet.getvalue())
 
     def test_db_hints(self):
         url = "postgresql://postgres:x@127.0.0.1:5432/hansungrules"
