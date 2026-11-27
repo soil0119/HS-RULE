@@ -102,10 +102,10 @@ class SessionTests(unittest.TestCase):
     def test_missing_configuration_exits_with_a_clear_message(self):
         with mock.patch.dict(os.environ, {"DATABASE_URL": ""}, clear=False), mock.patch("sys.stderr"):
             self.assertEqual(ask_rag.main(["-q", "x", "--env-file", "/nonexistent"]), 2)
-        env = {"DATABASE_URL": "postgresql://x", "GEMINI_API_KEY": "", "GEMINI_MODEL": "", "LLM_PROVIDER": ""}
+        env = {"DATABASE_URL": "postgresql://x", "GROQ_API_KEY": "", "GROQ_MODEL": "", "LLM_PROVIDER": ""}
         with mock.patch.dict(os.environ, env, clear=False), mock.patch("sys.stderr", new=io.StringIO()) as err:
             self.assertEqual(ask_rag.main(["-q", "x", "--env-file", "/nonexistent"]), 2)
-        self.assertIn("GEMINI_API_KEY", err.getvalue())
+        self.assertIn("GROQ_API_KEY", err.getvalue())
 
     def test_env_file_fills_only_missing_values_without_printing_them(self):
         with tempfile.TemporaryDirectory() as directory:
