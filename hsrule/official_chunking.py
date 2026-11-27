@@ -15,7 +15,25 @@ ATTACHMENT_HEADER = re.compile(r"^[ \t]*\[별표/서식 파일\][ \t]*$", re.MUL
 REFERENCE = re.compile(r"제[ \t]*(\d+)[ \t]*조(?:[ \t]*의[ \t]*(\d+))?")
 APPENDIX_REFERENCE = re.compile(r"<?[ \t]*(별표)[ \t]*([0-9]+|[ⅠⅡⅢⅣⅤ])[ \t]*>?")
 DELETED = re.compile(r"^[ \t]*[(（]?삭제")
-
+# 삭제 표시(#53). '삭제' 뒤에는 괄호 안 주석(개정 날짜 등)만 허용한다. '삭제 절차'처럼 다른 말이 이어지면 삭제로 보지 않는다.
+_OPEN, _CLOSE = "(（<〈《\\[", ")）>〉》\\]"
+_ANNOTATION = rf"[{_OPEN}][^{_CLOSE}\n]*[{_CLOSE}]"
+STRICT_DELETED = re.compile(
+    rf"^[ \t]*(?:[①-⑳][ \t]*)?(?:[{_OPEN}][ \t]*삭제[ \t]*[\d.\s,~\-년월일]*[{_CLOSE}]|삭제)"
+    rf"(?:[ \t]*{_ANNOTATION})*[ \t]*$")
+ANNOTATION_ONLY = re.compile(rf"^[ \t]*{_ANNOTATION}(?:[ \t]*{_ANNOTATION})*[ \t]*$")
+TITLE_AND_TAIL = re.compile(r"^[ \t]*[(（]([^)）\n]*)[)）][ \t]*(.*)$")
+# 참조 앞에 붙은 대상 이름(#57). 이름은 참조 바로 앞 한 낱말이다(띄어쓰기로 구분).
+_LAW = r"(?:법률|법령|시행령|시행규칙|(?<![방문기수요어편용화해])법)"
+_REGULATION = r"(?:학칙|정관|시행세칙|세칙|규정|규칙|지침|내규|요령)"
+TARGET_NAME = re.compile(
+    rf"(?:^|(?<=[\s(（「『]))(?P<demo>(?:이|본|당|동|같은|위)[ \t]+)?"
+    rf"(?P<name>[가-힣A-Za-z0-9·]*?(?P<suffix>{_LAW}|{_REGULATION}))[ \t]*[」』]?[ \t]*(?:의[ \t]*)?$")
+ATTACHED_DEMO = re.compile(rf"^(?:이|본|당|동)(?:{_LAW}|{_REGULATION})$")
+BARE_UNIQUE = ("학칙", "정관")  # 대학에 하나뿐이라 이름만으로 대상이 정해진다
+# 연속 참조('학칙 제37조제2항 및 제38조')의 이음말
+CHAIN_JOINERS = re.compile(r"^(?:[\s,·ㆍ~\-]|제[ \t]*\d+[ \t]*[항호]|및|와|과|또는|부터|내지)*$")
+OWN_ARTICLE = re.compile(r"제\d+조(?:의\d+)?$")
 
 class ChunkingError(ValueError):
     """공식 규정 본문을 청킹할 수 없다."""
@@ -91,15 +109,51 @@ def split_units(text: str) -> list[dict]:
     return units
 
 
-def extract_references(content: str, own_article: str = "") -> list[str]:
-    """조 교차 참조(제N조, 제N조의M)와 별표 참조를 정규화해 등장 순서대로 반환한다."""
-    refs = []
+def _reference_target(window: str, own_title: str) -> str:
+    """참조 바로 앞 낱말로 대상을 정한다: local(이름 없음), self(현재 규정), other(다른 규정·법률·미확정).
+
+    '이 규정'·'본 학칙'처럼 지시어가 붙으면 현재 규정이다. 법률 이름(「고등교육법」, 같은 법, 동법)은 외부다.
+    '학칙'·'정관'은 이름만으로 정해지므로 현재 규정 제목과 비교한다. '○○ 규정'처럼 앞 낱말 없이 '규정'만 보이는
+    경우는 어느 규정인지 확정할 수 없으므로 다른 대상으로 보고 로컬 조문으로 확장하지 않는다.
+    """
+    match = TARGET_NAME.search(window)
+    if not match:
+        return "local"
+    name, is_law = match.group("name"), bool(re.fullmatch(_LAW, match.group("suffix")))
+    if match.group("demo") or ATTACHED_DEMO.match(name):
+        return "other" if is_law else "self"
+    if is_law:
+        return "other"
+    title = re.sub(r"[\s「」『』]", "", own_title)
+    if name in BARE_UNIQUE:
+        return "self" if title.endswith(name) else "other"
+    if name == match.group("suffix"):  # '규정'·'세칙'만 보이면 어느 규정인지 모른다
+        return "other"
+    return "self" if title and (title == name or title.endswith(name)) else "other"
+
+
+def extract_references(content: str, own_article: str = "", own_title: str = "") -> list[str]:
+    """조 교차 참조(제N조, 제N조의M)와 별표 참조를 정규화해 등장 순서대로 반환한다.
+
+    다른 규정·외부 법률 이름이 붙은 참조(「고등교육법」 제8조, 학칙 제37조 등)와 대상을 확정할 수 없는 참조는
+    현재 규정의 같은 번호 조항과 다를 수 있으므로 제외한다(#57). 이름이 없는 참조와 현재 규정을 가리키는
+    참조('이 규정 제3조', 현재 규정 제목)만 남긴다.
+    자기 조항(부칙 자기 헤더 포함)은 제외한다.
+    """
+    refs, previous = [], None  # previous: (끝 위치, 대상)
     for match in REFERENCE.finditer(content):
-        ref = f"제{match.group(1)}조" + (f"의{match.group(2)}" if match.group(2) else "")
-        refs.append(ref)
+        line_start = content.rfind("\n", 0, match.start()) + 1
+        target = _reference_target(content[max(line_start, match.start() - 60):match.start()], own_title)
+        if previous and CHAIN_JOINERS.match(content[previous[0]:match.start()]):
+            target = previous[1]  # '학칙 제37조제2항 및 제38조'처럼 이어지는 참조는 같은 대상을 따른다.
+        previous = (match.end(), target)
+        if target == "other":
+            continue
+        refs.append(f"제{match.group(1)}조" + (f"의{match.group(2)}" if match.group(2) else ""))
     for match in APPENDIX_REFERENCE.finditer(content):
         refs.append(f"별표{match.group(2)}")
-    own = own_article.split(")")[-1]
+    own_match = OWN_ARTICLE.search(own_article.split(")")[-1])
+    own = own_match.group(0) if own_match else own_article.split(")")[-1]
     return [ref for ref in dict.fromkeys(refs) if ref != own]
 
 
@@ -162,13 +216,26 @@ def _windows(text, unit, prefix, tokenizer, max_tokens, overlap_tokens):
 
 
 def _is_deleted(unit: dict, body: str) -> bool:
+    """조 머리글 줄 안의 삭제 표시와 다음 줄들의 삭제 표시를 함께 본다(#53).
+
+    '제17조(삭제)', '제17조(입학생 등록) 삭제', 머리글 다음 줄의 '삭제 (2005. 4.12)'를 삭제로 판정한다.
+    삭제 표시 뒤에 본문이 이어지면 삭제로 보지 않는다.
+    """
     if unit["kind"] != "article":
         return False
     lines = body.splitlines()
     for index, line in enumerate(lines):
-        if ARTICLE_HEADER.match(line):
-            rest = [item for item in lines[index + 1:] if item.strip()]
-            return bool(rest) and all(DELETED.match(item) for item in rest)
+        header = ARTICLE_HEADER.match(line)
+        if not header:
+            continue
+        rest = [item for item in lines[index + 1:] if item.strip()]
+        inline = line[header.end():]
+        parts = TITLE_AND_TAIL.match(inline)
+        title, tail = (parts.group(1), parts.group(2).strip()) if parts else ("", inline.strip())
+        inline_deleted = bool((title and STRICT_DELETED.match(f"({title.strip()})")) or (tail and STRICT_DELETED.match(tail)))
+        if inline_deleted:  # 머리글에서 삭제됐으면 뒤 줄은 삭제 표시나 개정 주석만 허용한다.
+            return all(STRICT_DELETED.match(item) or ANNOTATION_ONLY.match(item) for item in rest)
+        return bool(rest) and all(STRICT_DELETED.match(item) for item in rest)
     return False
 
 
@@ -199,7 +266,7 @@ def chunk_regulation(regulation: dict, tokenizer, max_tokens: int = 128, overlap
                 "unit_start": unit["start"], "unit_end": unit["end"],
                 "source_start": source_start, "source_end": source_end,
                 "content": content, "embedding_text": prefix + content,
-                "references": extract_references(content, unit["article_id"]),
+                "references": extract_references(content, unit["article_id"], regulation["title"]),
                 "deleted": _is_deleted(unit, text[unit["start"]:unit["end"]]),
             })
     return chunks
