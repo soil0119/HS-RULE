@@ -156,10 +156,10 @@ class AbortedRunTests(unittest.TestCase):  # #56
 
         sync_snapshot([reg("30", "30:1")], self.repo, self.emb)
         with self.assertRaises(RuntimeError):
-            sync_snapshot([reg()], DeleteFails(URL), self.emb)  # 스냅샷에서 빠진 규정 30의 삭제가 실패한다
+            sync_snapshot([reg()], DeleteFails(URL), self.emb, complete=True)  # 빠진 규정 30의 삭제가 실패한다
         self.assertFalse(self.repo.last_run()["ok"])
         self.assertIsNotNone(self.repo.get_revision("30:1"))  # 삭제 실패 시 이전 색인은 그대로다
-        report = sync_snapshot([reg()], self.repo, self.emb)
+        report = sync_snapshot([reg()], self.repo, self.emb, complete=True)
         self.assertEqual((report["unchanged"], report["removed"]), (["20:1"], ["30"]))
         self.assertTrue(self.repo.last_run()["ok"])
 

@@ -1,0 +1,22 @@
+{
+  "answer": "제40조에 따라 7학기에 가능합니다.",
+  "sources": [
+    {
+      "label": "S1",
+      "chunk_id": "20:1:3",
+      "regulation_id": "20",
+      "revision_id": "20:1",
+      "title": "한성대학교 학칙",
+      "article_id": "제40조",
+      "url": "https://rule.example/20",
+      "source_kind": "official_html",
+      "source_start": 0,
+      "source_end": 10,
+      "score": null
+    }
+  ],
+  "found": true,
+  "followups": [
+    "신청은?"
+  ]
+}
