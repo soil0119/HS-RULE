@@ -296,3 +296,309 @@ dialog::backdrop { background: oklch(0.15 0.004 260 / .35); }
 .footer-note { padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; line-height: 1.8; }
 @media (max-width: 800px) { .footer-columns { gap: 28px; } }
 @media (max-width: 600px) { .primary-nav { display: none; } .footer-inner { padding: 30px 18px 23px; } .footer-columns { grid-template-columns: minmax(0,1fr); gap: 25px; padding-bottom: 26px; } .footer-column h2 { margin-bottom: 8px; } .footer-column p { max-width: 100%; margin-bottom: 4px; } }
+
+/* 관리자 전용 RAG 설정 영역 */
+.rag-settings-section {
+  margin-bottom: 30px;
+  padding: 17px 18px 18px;
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--fg);
+  background: var(--bg);
+}
+.rag-settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.rag-settings-heading h2 {
+  font-size: 16px;
+  font-weight: 650;
+}
+.rag-settings-heading p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.rag-settings-heading .status-label {
+  flex-shrink: 0;
+}
+.rag-setting-item {
+  padding: 15px 0;
+  border-top: 1px solid var(--border);
+}
+.rag-setting-label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  column-gap: 9px;
+  margin-bottom: 11px;
+  min-width: 0;
+}
+.rag-setting-label label {
+  grid-column: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.rag-setting-label output {
+  grid-column: 2;
+  min-width: 42px;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.rag-default-value {
+  grid-column: 4;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.rag-modified {
+  grid-column: 3;
+  color: var(--warning);
+  background: var(--warning-bg);
+  border: 1px solid oklch(0.86 0.022 80);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.rag-setting-item input[type="range"] {
+  display: block;
+  width: 100%;
+  min-height: 24px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.rag-setting-item input[type="number"] {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--strong-border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.rag-setting-item input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.rag-setting-item > p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+#rag-settings-controls:disabled .rag-setting-item {
+  opacity: .62;
+}
+#rag-settings-controls:disabled input {
+  cursor: not-allowed;
+}
+.rag-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 15px;
+  border-top: 1px solid var(--border);
+}
+.rag-settings-footer > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.rag-settings-footer .button {
+  min-width: 112px;
+}
+.rag-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+.rag-settings-actions .button {
+  min-width: 112px;
+}
+@media (max-width: 600px) {
+  .rag-settings-section {
+    margin-bottom: 25px;
+    padding: 14px 13px 15px;
+  }
+  .rag-settings-heading {
+    gap: 10px;
+  }
+  .rag-settings-heading p {
+    font-size: 12px;
+  }
+  .rag-settings-heading .status-label {
+    font-size: 10px;
+  }
+    .rag-setting-label {
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      align-items: center;
+      column-gap: 8px;
+      row-gap: 7px;
+    }
+
+    .rag-setting-label label {
+      grid-column: 1 / -1;
+      grid-row: 1;
+      font-size: 13px;
+    }
+
+    .rag-setting-label output {
+      grid-column: 1;
+      grid-row: 2;
+      min-width: 0;
+      text-align: left;
+    }
+
+    .rag-modified {
+      grid-column: 2;
+      grid-row: 2;
+      justify-self: start;
+      align-self: center;
+      margin: 0;
+    }
+
+    .rag-default-value {
+      grid-column: 3;
+      grid-row: 2;
+      justify-self: end;
+      align-self: center;
+      font-size: 12px;
+    }
+  .rag-settings-footer {
+    align-items: stretch;
+  }
+  .rag-settings-actions {
+    width: 100%;
+    gap: 8px;
+  }
+  .rag-settings-actions .button {
+    flex: 1;
+    min-width: 0;
+  }
+}
+/* RAG 설정값 정렬 최종 강제 적용 */
+@media (max-width: 600px) {
+  .rag-setting-label {
+    display: grid !important;
+    grid-template-columns: max-content max-content minmax(0, 1fr) !important;
+    grid-template-rows: auto auto !important;
+    align-items: center !important;
+    justify-content: initial !important;
+    column-gap: 8px !important;
+    row-gap: 7px !important;
+  }
+
+  .rag-setting-label label {
+    grid-column: 1 / -1 !important;
+    grid-row: 1 !important;
+  }
+
+  .rag-setting-label output {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    align-self: center !important;
+    margin: 0 !important;
+  }
+
+  .rag-setting-label .rag-modified {
+    grid-column: 2 !important;
+    grid-row: 2 !important;
+    align-self: center !important;
+    justify-self: start !important;
+    margin: 0 !important;
+  }
+
+  .rag-setting-label .rag-default-value {
+    grid-column: 3 !important;
+    grid-row: 2 !important;
+    align-self: center !important;
+    justify-self: end !important;
+    margin: 0 !important;
+  }
+}
+/*혹시 몰라서*/
+/* RAG 설정 하단 버튼 영역 개선 */
+.rag-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rag-settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.rag-settings-actions .button {
+  min-width: 120px;
+  min-height: 44px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 5px;
+}
+
+.rag-settings-actions #reset-rag-settings {
+  background: var(--bg);
+  border: 1px solid var(--strong-border);
+  color: var(--fg);
+}
+
+.rag-settings-actions #reset-rag-settings:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--accent);
+}
+
+.rag-settings-actions #save-rag-settings {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.rag-settings-actions #save-rag-settings:hover:not(:disabled) {
+  background: var(--blue-dark);
+  border-color: var(--blue-dark);
+}
+
+/* 모바일 화면 */
+@media (max-width: 600px) {
+  .rag-settings-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .rag-settings-actions {
+    width: 100%;
+    margin-left: 0;
+    gap: 8px;
+  }
+
+  .rag-settings-actions .button {
+    flex: 1;
+    min-width: 0;
+    padding: 9px 8px;
+  }
+}

@@ -245,13 +245,110 @@
     const fileInput = $('#upload-files'), startUpload = $('#start-upload'), deleteDialog = $('#delete-dialog');
     let verified = false, documentState = API.authenticated() ? 'idle' : 'locked', documentError = null, documents = [], queue = [], selecting = false, uploading = false, uploadError = null, uploadErrorFilename = '', conflictFile = null, conflictBusy = false, conflictState = 'idle', conflictError = null, conflictData = null, deleting = false, deleteItem = null, deleteError = null;
     const busy = () => uploading || selecting || conflictBusy || deleting;
+    // RAG 설정 UI: 인증된 관리자에게만 표시한다. 저장 API가 준비되기 전까지는 화면 값만 조정할 수 있다.
+    const ragSection = $('#rag-settings'), ragControls = $('#rag-settings-controls'), ragSave = $('#save-rag-settings');
+    const ragK = $('#rag-retrieval-k'), ragKValue = $('#rag-retrieval-k-value');
+    const ragCosine = $('#rag-min-cosine'), ragCosineValue = $('#rag-min-cosine-value');
+    const ragTemperature = $('#rag-temperature'), ragTemperatureValue = $('#rag-temperature-value');
+    function renderRagSettings() {
+      if (!ragSection) return;
+      ragSection.hidden = !verified;
+      if (ragControls) ragControls.disabled = !verified;
+      if (ragSave) ragSave.disabled = true; // 저장 API 계약이 확인되기 전에는 저장을 허용하지 않는다.
+      const status = $('#rag-settings-status');
+      if (status) status.textContent = verified ? '화면에서 값 조정 가능 · 저장 API 연동 대기 중' : '관리자 인증 후 표시됩니다.';
+    }
+    function updateRagSettingValues() {
+      if (ragK && ragKValue) {
+        ragKValue.textContent = ragK.value;
+      }
+
+      if (ragCosine && ragCosineValue) {
+        ragCosineValue.textContent = Number(ragCosine.value).toFixed(2);
+      }
+
+      if (ragTemperature && ragTemperatureValue) {
+        const value = Number(ragTemperature.value);
+
+        if (ragTemperature.value !== '' && Number.isFinite(value)) {
+          ragTemperatureValue.textContent = value.toFixed(1);
+        }
+      }
+
+      // 기본값과 현재 설정값 비교
+      const setModified = (id, modified) => {
+        const indicator = document.getElementById(id);
+
+        if (indicator) {
+          indicator.hidden = !modified;
+        }
+      };
+
+      setModified(
+        'rag-retrieval-k-modified',
+        Number(ragK.value) !== 6
+      );
+
+      setModified(
+        'rag-min-cosine-modified',
+        Math.abs(Number(ragCosine.value) - 0.25) > 0.000001
+      );
+
+      setModified(
+        'rag-temperature-modified',
+        ragTemperature.value === '' ||
+        !Number.isFinite(Number(ragTemperature.value)) ||
+        Math.abs(Number(ragTemperature.value) - 0.0) > 0.000001
+      );
+    }
+
+    function normalizeTemperature() {
+      if (!ragTemperature || ragTemperature.value === '') return;
+
+      let value = Number(ragTemperature.value);
+      if (!Number.isFinite(value)) return;
+
+      value = Math.min(2, Math.max(0, value));
+      ragTemperature.value = value.toFixed(1);
+      updateRagSettingValues();
+    }
+
+    [ragK, ragCosine, ragTemperature]
+      .filter(Boolean)
+      .forEach(control => control.addEventListener('input', updateRagSettingValues));
+
+    if (ragTemperature) {
+      ragTemperature.addEventListener('change', normalizeTemperature);
+      ragTemperature.addEventListener('blur', normalizeTemperature);
+    }
+
+    updateRagSettingValues();
+
+    if (ragTemperature) {
+      ragTemperature.addEventListener('focus', () => {
+        ragTemperature.select();
+      });
+    }
+
+    const resetRagSettings = $('#reset-rag-settings');
+
+    if (resetRagSettings) {
+      resetRagSettings.addEventListener('click', () => {
+        if (ragK) ragK.value = '6';
+        if (ragCosine) ragCosine.value = '0.25';
+        if (ragTemperature) ragTemperature.value = '0.0';
+
+        updateRagSettingValues();
+      });
+    }
+
     function renderAuth() {
       const hasToken = API.authenticated(); $('#auth-bar').hidden = verified; $('#auth-status').textContent = t(verified ? 'sessionVerified' : documentState === 'pending' ? 'sessionChecking' : hasToken ? 'managementUnavailable' : 'loginRequired');
       $('#auth-message').textContent = documentError ? errorText(documentError, 'management') : t(hasToken ? 'managementChecking' : 'adminRequired'); $('a', $('#auth-bar')).hidden = hasToken;
       $('#upload-controls').disabled = !verified || uploading || selecting; $('#conflict-controls').disabled = !verified || conflictBusy;
       $('#refresh-uploaded').disabled = !hasToken || documentState === 'pending'; startUpload.disabled = !verified || uploading || selecting || !queue.some(item => ['queued', 'failed'].includes(item.state)); $('#start-conflict').disabled = !verified || conflictBusy || !conflictFile;
       $('#upload-title').disabled = queue.length > 1 || !verified || uploading || selecting; $('#upload-title-hint').textContent = t(queue.length > 1 ? 'multipleTitleHint' : 'visibilityHint');
-      $('span', startUpload).textContent = t(uploading ? 'storing' : 'storePdfs'); $('#conflict-file-name').textContent = conflictFile ? conflictFile.name : t('noFileSelected'); updateAccount();
+      $('span', startUpload).textContent = t(uploading ? 'storing' : 'storePdfs'); $('#conflict-file-name').textContent = conflictFile ? conflictFile.name : t('noFileSelected'); renderRagSettings(); updateAccount();
     }
     function handleAuthError(error) { if (![401, 403].includes(error?.status)) return false; API.clearToken(); verified = false; documentError = error; documentState = 'locked'; documents = []; renderAuth(); renderDocuments(); return true; }
     function renderDocuments() {
