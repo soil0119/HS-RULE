@@ -27,29 +27,53 @@
 </section>
 <section id="library-view" hidden data-od-id="regulation-library"><div class="page-heading"><div><h1 data-i18n="libraryTitle" data-od-id="library-title">규정 문서</h1><p data-i18n="libraryDescription">공식 규정 사이트의 규정명·개정 정보·원문을 확인합니다.</p></div></div><div class="toolbar"><div class="search-field"><svg class="icon" aria-hidden="true"><use href="icons.svg#search"></use></svg><label class="sr-only" for="library-search" data-i18n="librarySearch">제목 또는 파일명 검색</label><input id="library-search" type="search" placeholder="제목 또는 파일명으로 검색" data-i18n-placeholder="librarySearchPlaceholder" data-od-id="library-search"></div><label class="sr-only" for="chapter-filter" data-i18n="chapterFilter">장별 필터</label><select class="filter-select" id="chapter-filter" data-od-id="chapter-filter"><option value="all" data-i18n="allChapters">전체 분류</option></select><button class="button refresh-button" id="refresh-library" type="button" aria-label="목록 새로고침" data-i18n-label="refresh" data-od-id="refresh-library"><svg class="icon" aria-hidden="true"><use href="icons.svg#refresh"></use></svg><span data-i18n="refresh">새로고침</span></button></div><div class="table-caption"><h2 data-i18n="pdfDocuments">규정 목록</h2><span id="library-count" aria-live="polite" data-i18n="notLoaded">확인 전</span></div><div id="rules-list" data-od-id="regulation-results"></div><p class="library-note" data-i18n="libraryNote">제공된 목록 기준입니다. 원본 저장 여부가 답변 검색 연결이나 전체 규정 수록을 의미하지는 않습니다.</p></section>
 </main>
+
 <footer class="site-footer" data-od-id="site-footer">
-  <div class="footer-inner">
-    <div class="footer-columns">
-      <section class="footer-column" aria-labelledby="footer-guide-title">
-        <h2 id="footer-guide-title" data-i18n="footerGuide">이용 안내</h2>
-        <p data-i18n="guideQuestionBody">규정명이나 확인하고 싶은 절차를 함께 적어 주세요.</p>
-        <button class="footer-link" type="button" data-open-help data-i18n="help" data-od-id="footer-help">이용 안내</button>
-      </section>
-      <section class="footer-column" aria-labelledby="footer-sources-title">
-        <h2 id="footer-sources-title" data-i18n="footerSources">규정 원문</h2>
-        <p data-i18n="guideSourceShortBody">공식 규정의 개정일과 해당 조항을 원문에서 확인하세요.</p>
-        <a class="footer-link" href="index.html#library" data-route="library" data-nav="library" data-i18n="browseLibrary" data-od-id="nav-regulations">규정 문서 열람</a>
-        <a class="footer-link" href="https://rule.hansung.ac.kr/" target="_blank" rel="noopener noreferrer" data-i18n="officialSite" data-od-id="official-regulations">학교 규정관리시스템</a>
-      </section>
-      <section class="footer-column" aria-labelledby="footer-admin-title">
-        <h2 id="footer-admin-title" data-i18n="account">관리자 도구</h2>
-        <p data-i18n="footerAdminDescription">보조자료 등록과 공개 범위 관리는 관리자 계정으로 이용하세요.</p>
-        <a class="footer-link" href="login.html?next=upload" data-admin-entry data-od-id="footer-admin"><span>관리자 로그인</span></a>
-      </section>
+    <div class="footer-inner">
+        <div class="footer-columns">
+            <section class="footer-column" aria-labelledby="footer-guide-title">
+                <h2 id="footer-guide-title" data-i18n="footerGuide">이용 안내</h2>
+                <p data-i18n="guideQuestionBody">규정명이나 확인하고 싶은 절차를 함께 적어 주세요.</p>
+                <button class="footer-link" type="button" data-open-help data-i18n="help" data-od-id="footer-help">이용 안내</button>
+            </section>
+
+            <section class="footer-column" aria-labelledby="footer-sources-title">
+                <h2 id="footer-sources-title" data-i18n="footerSources">규정 원문</h2>
+                <p data-i18n="guideSourceShortBody">공식 규정의 개정일과 해당 조항을 원문에서 확인하세요.</p>
+
+                <a class="footer-link" href="index.html#library" data-route="library" data-nav="library" data-i18n="browseLibrary" data-od-id="nav-regulations">규정 문서 열람</a>
+
+                <a class="footer-link" href="https://rule.hansung.ac.kr/" target="_blank" rel="noopener noreferrer">학교 규정관리시스템</a>
+
+                <a class="footer-link" href="https://www.hansung.ac.kr/hansung/index.do" target="_blank" rel="noopener noreferrer">한성대학교 홈페이지</a>
+
+                <a class="footer-link" href="https://hsportal.hansung.ac.kr/" target="_blank" rel="noopener noreferrer">스마트자기관리시스템</a>
+
+                <a class="footer-link" href="https://info.hansung.ac.kr/" target="_blank" rel="noopener noreferrer">종합정보시스템</a>
+            </section>
+
+            <section class="footer-column" aria-labelledby="footer-admin-title">
+                <h2 id="footer-admin-title" data-i18n="account">관리자 도구</h2>
+                <p data-i18n="footerAdminDescription">보조자료 등록과 공개 범위 관리는 관리자 계정으로 이용하세요.</p>
+
+                <a class="footer-link github-repo-link"
+                   href="https://github.com/soil0119/HS-RULE"
+                   target="_blank"
+                   rel="noopener noreferrer">
+                    <img src="github-icon.png" alt="" class="github-footer-icon">
+                    <span>HS-RULE GitHub 저장소</span>
+                </a>
+
+                <a class="footer-link" href="login.html?next=upload" data-admin-entry data-od-id="footer-admin">
+                    <span>관리자 로그인</span>
+                </a>
+            </section>
+        </div>
+
+        <p class="footer-note" data-i18n="referenceDisclaimer">안내는 참고용입니다. 최종 판단은 규정 원문과 담당 부서에 확인하세요.</p>
     </div>
-    <p class="footer-note" data-i18n="referenceDisclaimer">안내는 참고용입니다. 최종 판단은 규정 원문과 담당 부서에 확인하세요.</p>
-  </div>
 </footer>
+
 <dialog class="history-dialog" id="history-dialog" aria-labelledby="history-title" data-od-id="question-history"><div class="dialog-content"><div class="dialog-heading"><h2 id="history-title" data-i18n="history">최근 질문</h2><button class="icon-button" type="button" data-close-dialog aria-label="닫기" data-i18n-label="close" data-od-id="close-history"><svg class="icon" aria-hidden="true"><use href="icons.svg#x"></use></svg></button></div><div id="history-list" class="history-list"></div><p class="dialog-note" data-i18n="historyPrivacy">질문 이력은 현재 브라우저에 저장됩니다. 공용 기기에서 개인정보를 입력하지 마세요.</p></div></dialog>
 <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title" data-od-id="settings-menu"><div class="dialog-content"><div class="dialog-heading"><h2 id="settings-title" data-i18n="settings">언어 및 계정 설정</h2><button class="icon-button" type="button" data-close-dialog aria-label="닫기" data-i18n-label="close" data-od-id="close-settings"><svg class="icon" aria-hidden="true"><use href="icons.svg#x"></use></svg></button></div><div class="settings-body"><div class="settings-row"><label for="menu-audience" data-i18n="audience">질문 예시 대상</label><select class="audience-select" id="menu-audience" data-audience data-od-id="menu-audience"><option value="student" data-i18n="student">학생</option><option value="staff" data-i18n="staff">교직원</option></select></div><div class="settings-row"><span data-i18n="language">언어</span><div class="language-toggle" role="group" aria-label="화면 언어" data-i18n-label="interfaceLanguage"><button type="button" class="language-switch" role="switch" aria-checked="false" aria-label="영어 사용" data-i18n-label="useEnglish" data-language-toggle data-od-id="menu-language-switch"><span class="language-code" aria-hidden="true">KO</span><span class="language-track" aria-hidden="true"><span class="language-thumb"></span></span><span class="language-code" aria-hidden="true">EN</span></button></div></div><div class="settings-account"><a class="account-link" href="login.html" data-route="login" data-account data-od-id="menu-account"><svg class="icon" aria-hidden="true"><use href="icons.svg#user"></use></svg><span data-i18n="login">로그인</span></a><button class="button button-quiet" type="button" data-open-help data-i18n="help" data-od-id="menu-help">이용 안내</button></div></div></div></dialog>
 <dialog class="help-dialog" id="help-dialog" aria-labelledby="help-title" data-od-id="help-dialog"><div class="dialog-content"><div class="dialog-heading"><h2 id="help-title" data-i18n="helpTitle">HS-RULE 이용 안내</h2><button class="icon-button" type="button" data-close-dialog aria-label="닫기" data-i18n-label="close" data-od-id="close-help"><svg class="icon" aria-hidden="true"><use href="icons.svg#x"></use></svg></button></div><ol class="help-steps"><li><strong data-i18n="guideQuestionTitle">상황을 구체적으로 질문하세요</strong><p data-i18n="guideQuestionBody">규정명이나 확인하고 싶은 절차를 함께 적어 주세요.</p></li><li><strong data-i18n="guideSourceTitle">공식 규정 원문을 확인하세요</strong><p data-i18n="guideSourceBody">공식 원문에서 개정일과 해당 조항을 확인하세요. 안내와 원문이 다르면 원문과 담당 부서를 기준으로 판단하세요.</p></li><li><strong data-i18n="guideDocumentTitle">공식 사이트에서 규정을 수집합니다</strong><p data-i18n="guideDocumentBody">규정 데이터는 학교 규정관리시스템에서 수집한 원문을 사용합니다. 관리자 보조자료 업로드와는 별개입니다.</p></li></ol><p class="dialog-note" data-i18n="historyPrivacy">질문 이력은 현재 브라우저에 저장됩니다. 공용 기기에서 개인정보를 입력하지 마세요.</p></div></dialog>
