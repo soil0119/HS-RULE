@@ -13,7 +13,17 @@ from .pages import PageError, normalize_space, service_soup
 
 ATTACHMENT_HEADER = "[별표/서식 파일]"  # 청커의 별표 목록 경계 표기와 같다.
 _FILE_DOWN = re.compile(r"fileDown\(\s*'(\d+)'\s*,\s*'attach'\s*\)")
-_DELETED = re.compile(r"^[(（]?삭제")
+# 삭제 표시. RAG 청커의 STRICT_DELETED(#53, PR #88)와 같은 규칙이다: '삭제' 뒤에는 괄호 안 주석
+# (개정 날짜 등)만 올 수 있다. '삭제 절차는 …'처럼 다른 말이 이어지거나 '(기록 삭제)' 같은 조 제목은 삭제가 아니다.
+_OPEN, _CLOSE = "(（<〈《\\[", ")）>〉》\\]"
+_ANNOTATION = rf"[{_OPEN}][^{_CLOSE}\n]*[{_CLOSE}]"
+_STRICT_DELETED = re.compile(
+    rf"^[ \t]*(?:[①-⑳][ \t]*)?(?:[{_OPEN}][ \t]*삭제[ \t]*[\d.\s,~\-년월일]*[{_CLOSE}]|삭제)"
+    rf"(?:[ \t]*{_ANNOTATION})*[ \t]*$")
+_ANNOTATION_ONLY = re.compile(rf"^[ \t]*{_ANNOTATION}(?:[ \t]*{_ANNOTATION})*[ \t]*$")
+_TITLE_AND_TAIL = re.compile(r"^[ \t]*[(（]([^)）\n]*)[)）][ \t]*(.*)$")
+_ARTICLE_NO = r"제\s*\d+\s*조(?:\s*의\s*\d+)?"
+_HEADING_LABEL = re.compile(rf"^\s*{_ARTICLE_NO}(?:\s*(?:~|내지)\s*{_ARTICLE_NO})?")
 _ADDENDUM = re.compile(r"^부\s*칙(?:\s*\(([^)]*)\))?$")
 HEADING_CLASSES = ("chapter", "section", "subsection")  # 장·절·관
 # 본문으로 읽지 않는 노드. 이 밖의 텍스트는 위치를 모르더라도 버리지 않고 경고와 함께 남긴다.
@@ -119,6 +129,22 @@ def _content_lines(container: Tag, skip=lambda tag: False) -> list[str]:
 
 def _is_heading_cell(tag: Tag) -> bool:
     return "article" in _classes(tag)
+
+
+def is_deleted_article(heading: str, body: list[str]) -> bool:
+    """조 머리글과 본문 줄로 삭제 조문인지 판정한다.
+
+    머리글 제목이나 꼬리가 삭제 표시('제60조 (삭제)', '제95조의4 ~ 제95조의10 (삭제 2021. 8. 12.)')면
+    본문은 없거나 삭제 표시·주석만이어야 한다. 아니면 본문이 있고 모든 줄이 삭제 표시여야 한다('삭제 (2005. 4.12)').
+    """
+    label = _HEADING_LABEL.match(heading)
+    inline = heading[label.end():] if label else heading
+    parts = _TITLE_AND_TAIL.match(inline)
+    title, tail = (parts.group(1), parts.group(2).strip()) if parts else ("", inline.strip())
+    lines = [line for line in body if line.strip()]
+    if (title and _STRICT_DELETED.match(f"({title.strip()})")) or (tail and _STRICT_DELETED.match(tail)):
+        return all(_STRICT_DELETED.match(line) or _ANNOTATION_ONLY.match(line) for line in lines)
+    return bool(lines) and all(_STRICT_DELETED.match(line) for line in lines)
 
 
 class _Builder:
@@ -266,9 +292,7 @@ def parse_content(html: str, expected_title: str) -> dict:
                 body = _content_lines(block, skip=_is_heading_cell)
                 for line in body:
                     out.add(line)
-                # 본문이 모두 "삭제"이거나, 본문 없이 제목에 삭제를 적은 범위 조문("제95조의4 ~ … (삭제 …)")
-                out.articles[-1]["deleted"] = (all(_DELETED.match(line) for line in body) if body
-                                               else "삭제" in heading)
+                out.articles[-1]["deleted"] = is_deleted_article(heading, body)
             elif chapter_tag is not None:
                 out.close_article()
                 heading = normalize_space(chapter_tag.get_text(" "))

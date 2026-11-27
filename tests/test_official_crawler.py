@@ -5,10 +5,12 @@ fixture는 2026-11-25에 rule.hansung.ac.kr 공개 페이지에서 받은 실제
 네트워크·실제 사이트 호출은 하지 않는다.
 """
 import json
+import os
 import re
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
@@ -18,7 +20,7 @@ from hsrule_crawler.catalog import (CatalogEntry, Revision, parse_catalog, parse
 from hsrule_crawler.client import FetchError, OfficialClient
 from hsrule_crawler.collect import build_regulation, official_url
 from hsrule_crawler.pages import PageError
-from hsrule_crawler.parser import parse_content
+from hsrule_crawler.parser import is_deleted_article, parse_content
 from tests.fakes import local_tokenizer
 
 FIXTURES = Path(__file__).with_name("fixtures") / "official"
@@ -156,6 +158,42 @@ class ContentParserTests(unittest.TestCase):
         addenda = [a for a in self.articles if a["kind"] == "addendum"]
         self.assertEqual([a["label"] for a in addenda], ["부칙#1", "부칙(2026.4.21.공포)", "부칙(2026.11.11.공포)"])
         self.assertIn("본 변경 학칙은 공포한 날부터 시행한다.", self.text[addenda[-1]["start"]:addenda[-1]["end"]])
+
+    def test_deleted_marks_follow_the_strict_chunker_rule(self):
+        # RAG는 deleted 조문을 검색에서 빼므로, '삭제'로 시작하는 정상 문장을 삭제로 보면 안 된다(sumiiniee 리뷰).
+        # 실제 사이트 표기(정관·학칙·SEQ 54)와 합성 반례. 규칙은 청커 STRICT_DELETED(#53)와 같다.
+        deleted = [
+            ("제 17 조 (입학생 등록 및 구비서류)", ["삭제 (2005. 4.12)"]),  # 실제 학칙
+            ("제 53 조 (재입학특례조치)", ["삭제"]),  # 실제 학칙
+            ("제 60 조 (삭제)", []),  # 실제 정관
+            ("제 41 조 (삭제 2017. 8. 11.)", []),  # 실제 정관
+            ("제 95조의 4 ~ 제 95조의 10 (삭제 2021. 8. 12.)", []),  # 실제 정관 범위 조문
+            ("제 13 조 내지 제 17 조", ["(삭제 2007. 6. 5)"]),  # 실제 범위 조문
+            ("제 3 조 (목적)", ["① 삭제", "② 삭제 <2020. 1. 1.>"]),
+            ("제 5 조 (삭제)", ["(2010. 3. 1.)", "〈개정 2012. 2. 1.〉"]),
+            ("제 7 조 (보증인) 삭제", []),
+        ]
+        kept = [
+            ("제 9 조 (기록 삭제)", ["① 기록은 5년 뒤 삭제한다."]),
+            ("제 9 조 (기록 삭제)", []),
+            ("제 4 조 (절차)", ["삭제 절차는 총장이 정한다."]),
+            ("제 4 조 (절차)", ["삭제 (2005. 4.12)", "② 남은 항은 유효하다."]),
+            ("제 60 조 (삭제)", ["새로 들어온 문장"]),
+            ("제 8 조 (정의)", []),
+            ("제 6 조 (삭제된 자료의 보존)", ["삭제된 자료는 1년간 보존한다."]),
+        ]
+        for heading, body in deleted:
+            with self.subTest(heading=heading, body=body):
+                self.assertTrue(is_deleted_article(heading, body))
+        for heading, body in kept:
+            with self.subTest(heading=heading, body=body):
+                self.assertFalse(is_deleted_article(heading, body))
+
+        # 합성: 실제 학칙 제17조 본문을 '삭제'로 시작하는 정상 문장으로 바꾸면 삭제가 아니다.
+        html = fixture("content_20.html").replace("삭제 (2005. 4.12)", "삭제 절차는 총장이 따로 정한다.")
+        self.assertNotEqual(html, fixture("content_20.html"))
+        result = parse_content(html, "한성대학교 학칙")
+        self.assertEqual([a["label"] for a in result["articles"] if a["deleted"]], [])
 
     def test_attachments_are_metadata_and_listed_once(self):
         self.assertEqual([a["file_id"] for a in self.result["attachments"]], ["4159", "4160"])
@@ -493,9 +531,19 @@ class ClientTests(unittest.TestCase):
             start: (302, {"Location": "/lmxsrv/law/lawDetail2.do?SEQ=20"}, ""),
             moved: (200, {}, "본문"),
         })
-        self.assertEqual(client.get("lawDetail.do", {"SEQ": 20}), "본문")
+        # requests는 REQUESTS_CA_BUNDLE·CURL_CA_BUNDLE이 있으면 그 CA 경로를 verify로 쓴다(회사망·프록시).
+        # 어느 경우든 검증을 끄지(False) 않아야 한다.
+        ca_vars = ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+        clean = {key: value for key, value in os.environ.items() if key not in ca_vars}
+        with patch.dict(os.environ, clean, clear=True):
+            self.assertEqual(client.get("lawDetail.do", {"SEQ": 20}), "본문")
         self.assertEqual(adapter.sent, [(start, True), (moved, True)])
         self.assertEqual(len(self.slept), 1)  # 리다이렉트 요청도 요청 간격을 지킨다
+
+        client, adapter = self.transport({start: (200, {}, "본문")})
+        with patch.dict(os.environ, {**clean, "REQUESTS_CA_BUNDLE": "/etc/ssl/company-ca.pem"}, clear=True):
+            client.get("lawDetail.do", {"SEQ": 20})
+        self.assertEqual(adapter.sent, [(start, "/etc/ssl/company-ca.pem")])
 
 
 class StubClient:
