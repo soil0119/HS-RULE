@@ -57,7 +57,8 @@ uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 | `server.py` | 검색·로그인·규정 업로드 API와 HTML 서빙 |
 | `routers/teacher.py` | 문서 충돌 분석, PDF·DOCX 내보내기 |
 | `index.html`, `login.html`, `upload.html` | 검색·로그인·업로드 화면 |
-| `crawler.py` | 규정 본문 수집 |
+| `hsrule_crawler/` | 공식 규정 공개 페이지 목록·시행 개정·조항 DOM 파서 ([안내](docs/official-crawler.md)) |
+| `crawler.py` | 규정 본문 수집(쿠키 기반 구버전, `hsrule_crawler`로 대체 예정) |
 | `update_crawler.py` | PDF·DOCX·HWP·HWPX 첨부파일을 포함한 규정 수집 |
 | `crawler_config.py` | 환경변수 기반 크롤러 쿠키 설정 |
 | `patch_codes.py` | 수집한 규정에 규정 코드 추가 |
