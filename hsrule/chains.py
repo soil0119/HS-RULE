@@ -225,6 +225,19 @@ def _status_code(exc) -> int | None:
     return None
 
 
+def is_rate_limited(exc) -> bool:
+    """무료 한도 초과(429)인지 본다. 키·모델 설정 오류나 일반 provider 오류와 구분해 알린다(#76)."""
+    if _status_code(exc) == 429:
+        return True
+    return any(name in type(item).__name__.lower() for item in _error_chain(exc)
+               for name in ("ratelimit", "resourceexhausted"))
+
+
+def new_usage() -> dict:
+    """한 요청의 모델 호출 기록. 무료 한도는 질문 수가 아니라 재작성·재시도를 포함한 호출·토큰 기준이다."""
+    return {"calls": 0, "retries": 0, "input_tokens": 0, "output_tokens": 0}
+
+
 def is_retryable_error(exc) -> bool:
     """429·5xx·연결 실패만 다시 시도한다. 시간 초과는 남은 시간을 이미 다 썼으므로 다시 시도하지 않는다."""
     if is_timeout_error(exc):
@@ -246,21 +259,25 @@ def _retry_after(exc) -> float | None:
     return None
 
 
-def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int = MODEL_ATTEMPTS) -> str:
+def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int = MODEL_ATTEMPTS,
+                  usage: dict | None = None) -> str:
     """요청 마감 안에서 모델을 호출하고 응답 문자열을 돌려준다(#51).
 
     - 호출·재시도 직전에 남은 시간을 확인하고, MIN_CALL_SECONDS보다 적으면 DeadlineReached를 낸다.
     - 남은 시간을 호출별 timeout으로 넘긴다(provider 자체 재시도는 create_llm에서 끈다).
     - 429·5xx·연결 실패만 남은 시간 안에서 다시 시도한다. 대기(Retry-After 또는 지수 대기)가 마감을 넘기면
       기다리지 않고 원래 오류를 올린다.
+    - usage가 주어지면 호출·재시도 수와 provider가 알려 준 입력·출력 토큰을 더한다.
     """
     for attempt in range(1, attempts + 1):
         left = remaining()
         if left < MIN_CALL_SECONDS:
             raise DeadlineReached("질의에 허용된 시간을 넘겼습니다.")
         bound = llm.bind(timeout=left) if hasattr(llm, "bind") else llm
+        if usage is not None:
+            usage["calls"] += 1
         try:
-            return message_text(bound.invoke(messages).content)
+            message = bound.invoke(messages)
         except Exception as exc:
             if attempt == attempts or not is_retryable_error(exc):
                 raise
@@ -269,7 +286,15 @@ def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int =
                 wait = min(MAX_BACKOFF_SECONDS, 0.5 * 2 ** (attempt - 1))
             if remaining() - wait < MIN_CALL_SECONDS:
                 raise
+            if usage is not None:
+                usage["retries"] += 1
             sleep(wait)
+            continue
+        if usage is not None:
+            metadata = getattr(message, "usage_metadata", None) or {}
+            usage["input_tokens"] += int(metadata.get("input_tokens") or 0)
+            usage["output_tokens"] += int(metadata.get("output_tokens") or 0)
+        return message_text(message.content)
     raise AssertionError("unreachable")
 
 
@@ -316,7 +341,8 @@ class RegulationChain:
 
     def call_model(self, inputs: dict, messages: list) -> str:
         """재작성·답변·형식 재시도 등 모든 모델 호출이 같은 요청 마감을 공유한다(#51)."""
-        return invoke_within(self.llm, messages, lambda: self.remaining_seconds(inputs), sleep=self.sleep)
+        return invoke_within(self.llm, messages, lambda: self.remaining_seconds(inputs), sleep=self.sleep,
+                             usage=inputs.setdefault("usage", new_usage()))
 
     def _generate(self, inputs: dict) -> str:
         return self.call_model(inputs, self._answer_prompt.format_messages(
@@ -335,7 +361,8 @@ class RegulationChain:
                                             int(self.max_context_tokens * HISTORY_SHARE), self.count_tokens)
         return {"question": question.strip()[:MAX_QUESTION_CHARS], "history": history,
                 "include_private": include_private, "language": language, "started_at": self.clock(),
-                "dropped_for_context": 0, "evidence_budget": max(0, self.max_context_tokens - history_cost)}
+                "dropped_for_context": 0, "evidence_budget": max(0, self.max_context_tokens - history_cost),
+                "usage": new_usage()}
 
     def prepare(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
                 language: str = "ko") -> dict:

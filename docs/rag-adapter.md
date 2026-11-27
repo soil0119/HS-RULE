@@ -45,6 +45,10 @@ app = create_app(settings, document_store=store, rag_backend=create_regulation_a
 - `grounding`: `{checked, unsupported, verified, repaired}`. 답변의 수치(학점·평점·기간 등)가 인용 근거나 사용자가 말한 값에 있는지 확인한다. 어긋나면 남은 시간 안에서 한 번만 고쳐 쓰게 하고, 그래도 어긋나거나 고쳐 쓰기가 실패하면 처음 답변에 확인 안내 문장을 붙이고 `verified=false`로 둔다. 조 번호·인용 라벨·목록 번호는 검사하지 않고, 한글 수사(예: '일곱 학기')와 문장 의미는 검사하지 않는다.
 - 후속 질문 재작성이 조 번호·입학년도·과정·학적 상태·학과를 잃으면 검색 질문에 다시 붙인다. 영어 `Article 40`은 `제40조`를 덧붙여 조항 일치 검색이 되게 한다.
 
+## 로컬 질문 도구 (#76)
+
+웹 API 연결 전에도 `scripts/ask_rag.py`로 실제 DB·임베딩·모델을 시험한다. 준비와 시연 순서는 `docs/rag-local-demo.md`. 답변 결과의 `usage`는 모델 호출·재시도 수와 provider가 알려 준 입력·출력 토큰이다. 429는 `reason=rate_limit`으로 구분한다.
+
 ## 테스트
 
 `HSRULE_TEST_DATABASE_URL`을 일회용 PostgreSQL(pgvector)로 지정하면 DB 테스트까지 실행된다. 지정하지 않으면 해당 테스트는 건너뛴다. 모델·임베딩은 대역을 쓰므로 실제 품질 검증이 아니다(`docs/rag-evaluation.md`). 검색 상한과 근거 없음 기준은 `docs/rag-retrieval.md`, DB 스키마·실행 계획·중복 저장 책임은 `docs/rag-index-db.md`에 있다.

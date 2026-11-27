@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from hsrule.answering import RagError, extract_json
-from hsrule.chains import MIN_CALL_SECONDS, DeadlineReached, invoke_within, is_timeout_error
+from hsrule.chains import MIN_CALL_SECONDS, DeadlineReached, invoke_within, is_rate_limited, is_timeout_error
 
 MAX_TEXT_CHARS = 100_000   # 웹 API의 추출 텍스트 한도와 같다
 PASSAGE_CHARS = 600        # 문단 하나의 길이 상한
@@ -196,6 +196,9 @@ class ConflictAnalyzer:
                         raise _DeadlineExceeded() from exc
                     raise RagError("rag_backend_error", "충돌 분석 모델이 시간 안에 응답하지 않았습니다.",
                                    "timeout") from exc
+                if is_rate_limited(exc):
+                    raise RagError("rag_backend_error", "모델 호출 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.",
+                                   "rate_limit") from exc
                 # provider 예외 본문에는 문서 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "충돌 분석 모델 호출에 실패했습니다.", "provider") from exc
             try:
