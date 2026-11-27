@@ -22,7 +22,7 @@ def configured_client(**kwargs):
 
 class WebAuthTests(unittest.TestCase):
     def test_import_and_ui_without_runtime_dependencies(self):
-        env = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "SYSTEMROOT") if key in os.environ}
         code = """
 import sys
 from fastapi.testclient import TestClient
