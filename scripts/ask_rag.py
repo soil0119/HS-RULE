@@ -29,7 +29,7 @@ REASONS = {
     "timeout": "시간 안에 응답하지 않았습니다.",
     "rate_limit": "모델 호출 한도(무료 한도)를 넘었습니다. 잠시 뒤 다시 시도하세요.",
     "provider": "모델 호출에 실패했습니다. 키·모델 ID·네트워크를 확인하세요.",
-    "json": "모델이 정해진 형식으로 답하지 않았습니다.",
+    "json": "모델이 정해진 형식으로 답하지 않았습니다(다시 시도 후에도 실패). 같은 질문을 한 번 더 해 보세요.",
 }
 
 
@@ -134,26 +134,28 @@ def load_env_file(path) -> list[str]:
     return loaded
 
 
-def ping(llm) -> tuple[bool, str]:
+def ping(llm, provider: str = "gemini") -> tuple[bool, str]:
     """작은 요청 하나로 키·모델·네트워크를 확인한다. 예외 본문은 출력하지 않는다(키·원문이 섞일 수 있음)."""
     from hsrule.chains import _status_code, is_rate_limited, is_timeout_error
 
+    prefix = provider.upper()
+    console = "Groq 콘솔(console.groq.com)" if provider == "groq" else "AI Studio"
     try:
         (llm.bind(timeout=30) if hasattr(llm, "bind") else llm).invoke("Reply with OK.")
         return True, "모델 연결 정상"
     except Exception as exc:
         status = _status_code(exc)
         if is_rate_limited(exc):
-            return False, "호출 한도 초과(429). 잠시 뒤 다시 시도하거나 AI Studio에서 한도를 확인하세요."
+            return False, f"호출 한도 초과({status or 429}). 잠시 뒤 다시 시도하거나 {console}에서 한도를 확인하세요."
         if is_timeout_error(exc):
             return False, "시간 초과. 네트워크(방화벽·프록시)를 확인하세요."
         if status in (401, 403):
-            return False, (f"키 인증 실패({status}). GEMINI_API_KEY 값(앞뒤 공백·따옴표 없이)과 "
-                           "AI Studio에서 키가 활성인지 확인하세요.")
+            return False, (f"키 인증 실패({status}). {prefix}_API_KEY 값(앞뒤 공백·따옴표 없이)과 "
+                           f"{console}에서 키가 활성인지 확인하세요.")
         if status == 404:
-            return False, "모델을 찾을 수 없습니다(404). GEMINI_MODEL이 AI Studio 모델 목록에 있는 ID인지 확인하세요."
+            return False, f"모델을 찾을 수 없습니다(404). {prefix}_MODEL이 {console} 모델 목록에 있는 ID인지 확인하세요."
         if status == 400:
-            return False, "요청 거부(400). AI Studio에서 발급한 Gemini API 키인지, 모델 ID가 맞는지 확인하세요."
+            return False, f"요청 거부(400). {console}에서 발급한 키인지, {prefix}_MODEL이 맞는지 확인하세요."
         return False, f"모델 호출 실패({type(exc).__name__}{f', HTTP {status}' if status else ''})."
 
 
@@ -224,7 +226,7 @@ def main(argv=None) -> int:
         return 2
     llm = create_llm(settings)
     if args.ping or not args.no_ping:
-        ok, message = ping(llm)
+        ok, message = ping(llm, settings.provider)
         print(f"{settings.provider}/{settings.model}: {message}")
         if args.ping or not ok:
             return 0 if ok else 3

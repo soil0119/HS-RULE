@@ -9,7 +9,7 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
-from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_rate_limited, is_timeout_error, label_documents
+from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_generation_failure, is_rate_limited, is_timeout_error
 from hsrule.conditions import (GROUNDING_NOTICE, attach_questions, check_grounding, clarification,
                                detect_conditions, format_conditions)
 
@@ -128,6 +128,8 @@ class CitedAnswerer:
             if is_rate_limited(exc):
                 raise RagError("rag_backend_error", "모델 호출 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.",
                                "rate_limit") from exc
+            if is_generation_failure(exc):
+                raise RagError("rag_invalid_response", "질문 재작성 모델의 출력 형식 오류가 반복됐습니다.", "json") from exc
             raise RagError("rag_backend_error", "검색 단계에서 오류가 발생했습니다.", "provider") from exc
         docs = state["docs"]
         user_texts = [question] + [m.get("content", "") for m in messages or [] if m.get("role") == "user"]
@@ -202,6 +204,8 @@ class CitedAnswerer:
                 if is_rate_limited(exc):
                     raise RagError("rag_backend_error", "모델 호출 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.",
                                    "rate_limit") from exc
+                if is_generation_failure(exc):
+                    raise RagError("rag_invalid_response", "답변 모델의 출력 형식 오류가 반복됐습니다.", "json") from exc
                 # provider 예외 본문에는 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "답변 모델 호출에 실패했습니다.", "provider") from exc
             try:

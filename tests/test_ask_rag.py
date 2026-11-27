@@ -123,11 +123,18 @@ class SessionTests(unittest.TestCase):
         clock = FakeClock()
         self.assertEqual(ask_rag.ping(llm("OK")), (True, "모델 연결 정상"))
         for status, words in ((401, "키 인증 실패"), (403, "키 인증 실패"), (404, "GEMINI_MODEL"), (429, "한도"),
-                              (400, "모델 ID")):
+                              (400, "GEMINI_MODEL")):
             with self.subTest(status=status):
                 ok, message = ask_rag.ping(scripted(clock, ("raise", StatusError(status), 0)))
                 self.assertFalse(ok)
                 self.assertIn(words, message)
+
+    def test_ping_names_the_groq_settings(self):
+        clock = FakeClock()
+        ok, message = ask_rag.ping(scripted(clock, ("raise", StatusError(401), 0)), "groq")
+        self.assertFalse(ok)
+        self.assertIn("GROQ_API_KEY", message)
+        self.assertIn("console.groq.com", message)
 
     def test_ping_only_mode_does_not_need_a_database(self):
         env = {"DATABASE_URL": "", "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}
@@ -207,6 +214,32 @@ class DemoFindingsTests(unittest.TestCase):
         ask_rag.run_session(answerer, ["졸업학점은?"], out)
         self.assertIn("오류(provider, HTTP 400, invalid_request_error)", out.getvalue())
         self.assertNotIn("org_secret", out.getvalue())
+
+    def test_groq_output_parse_failure_is_retried(self):
+        from hsrule.chains import is_generation_failure, is_retryable_error
+
+        failure = GroqStatusError(400, "output_parse_failed")
+        self.assertTrue(is_generation_failure(failure))
+        self.assertTrue(is_retryable_error(failure))
+        self.assertFalse(is_retryable_error(GroqStatusError(400, "invalid_request_error")))
+        clock = FakeClock()
+        good = json.dumps({"found": True, "answer": "130학점(제34조).", "citations": ["S1"], "followups": []},
+                          ensure_ascii=False)
+        answerer = CitedAnswerer(scripted(clock, ("raise", failure, 0), ("reply", good, 0)), StubSearcher([CREDIT_MAIN]))
+        answerer.chain.clock = clock
+        result = answerer.answer("졸업학점은?")
+        self.assertTrue(result["found"])
+        self.assertEqual(result["usage"]["retries"], 1)
+
+    def test_repeated_output_parse_failure_is_a_format_error(self):
+        clock = FakeClock()
+        failure = GroqStatusError(400, "output_parse_failed")
+        answerer = CitedAnswerer(scripted(clock, *[("raise", failure, 0)] * 3), StubSearcher([CREDIT_MAIN]))
+        answerer.chain.clock = clock
+        out = io.StringIO()
+        ask_rag.run_session(answerer, ["졸업학점은?"], out)
+        self.assertIn("오류(json, HTTP 400, output_parse_failed)", out.getvalue())
+        self.assertIn("한 번 더", out.getvalue())
 
     def test_db_hints(self):
         url = "postgresql://postgres:x@127.0.0.1:5432/hansungrules"

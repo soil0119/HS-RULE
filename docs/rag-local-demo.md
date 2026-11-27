@@ -41,7 +41,7 @@ python scripts/ask_rag.py --language en -q "What does Article 34 say?"
 - provider 오류는 `오류(provider, HTTP 상태, 코드)`로 나온다. Groq 무료 한도는 분당 토큰도 있어서, 짧은 시간에 질문이 몰리면 `rate_limit`이 날 수 있다. 1분 뒤 다시 질문한다.
 - 대화 명령: `/new` 새 대화, `/en`·`/ko` 답변 언어, `/private` 비공개 규정 포함 전환, `/quit` 종료.
 - 시작할 때 작은 호출 1회로 키·모델을 확인하고, 실패하면 DB·임베딩을 건드리기 전에 원인(401·403 키, 404 모델, 429 한도, 시간 초과)을 알려 준다. `--no-ping`으로 끌 수 있다.
-- 오류는 원인별로 나온다: `timeout`(시간 초과), `rate_limit`(무료 한도 초과 429), `provider`(키·모델 ID·네트워크), `json`(형식). 키·모델 설정 누락은 시작할 때 바로 알린다.
+- 오류는 원인별로 나온다: `timeout`(시간 초과), `rate_limit`(무료 한도 초과 429·Groq 413), `provider`(키·모델 ID·네트워크), `json`(형식). Groq gpt-oss가 가끔 내는 `HTTP 400 output_parse_failed`(출력 해석 실패)는 자동으로 다시 시도하고, 계속 실패하면 `json`으로 나온다. 키·모델 설정 누락은 시작할 때 바로 알린다.
 
 ## 시연 순서 (#76 완료 기준)
 

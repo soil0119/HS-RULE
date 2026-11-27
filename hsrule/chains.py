@@ -23,6 +23,8 @@ MIN_CALL_SECONDS = 1.0     # 남은 시간이 이보다 적으면 모델 호출(
 MODEL_ATTEMPTS = 3         # 일시 오류(429·5xx·연결 실패)에 대한 재시도를 포함한 모델 호출 시도 수 (#51)
 MAX_BACKOFF_SECONDS = 8.0
 RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+# 요청은 맞았지만 이번 생성 결과를 provider가 해석하지 못한 400. gpt-oss(Groq)에서 가끔 나고 다시 보내면 대개 통과한다.
+GENERATION_FAILURE_CODES = frozenset({"output_parse_failed", "tool_use_failed", "json_validate_failed"})
 
 CONDENSE_SYSTEM = (
     "대화 이력과 마지막 질문이 주어진다. 이력 없이도 이해되는 한국어 검색 질문 한 문장으로 바꿔 쓴다. "
@@ -268,10 +270,17 @@ def new_usage() -> dict:
     return {"calls": 0, "retries": 0, "input_tokens": 0, "output_tokens": 0}
 
 
+def is_generation_failure(exc) -> bool:
+    """provider가 모델 출력을 해석하지 못한 400(Groq output_parse_failed 등). 키·모델 설정 오류와 다르다."""
+    return _status_code(exc) == 400 and _error_code(exc) in GENERATION_FAILURE_CODES
+
+
 def is_retryable_error(exc) -> bool:
-    """429·5xx·연결 실패만 다시 시도한다. 시간 초과는 남은 시간을 이미 다 썼으므로 다시 시도하지 않는다."""
+    """429·5xx·연결 실패·생성 결과 해석 실패만 다시 시도한다. 시간 초과는 남은 시간을 이미 다 썼으므로 다시 시도하지 않는다."""
     if is_timeout_error(exc):
         return False
+    if is_generation_failure(exc):
+        return True
     status = _status_code(exc)
     if status is not None:
         return status in RETRYABLE_STATUS
