@@ -57,6 +57,12 @@ class OfficialRepository:
         incoming = (revision["embedding_model"], EMBEDDING_DIM, revision["chunk_params"])
         cursor.execute("SELECT embedding_model, embedding_dim, chunk_params FROM hs_reg_index_meta FOR UPDATE")
         current = cursor.fetchone()
+        if current is None:
+            # 메타 행이 아직 없으면 FOR UPDATE가 잠글 행이 없다(#54). 색인 전체에 하나뿐인 잠금을 잡고,
+            # 기다리는 동안 다른 저장이 메타를 만들었을 수 있으므로 잠금 아래에서 다시 읽는다.
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("hs_reg_index_meta",))
+            cursor.execute("SELECT embedding_model, embedding_dim, chunk_params FROM hs_reg_index_meta FOR UPDATE")
+            current = cursor.fetchone()
         if current is not None:
             if (current["embedding_model"], current["embedding_dim"], current["chunk_params"]) == incoming:
                 return
@@ -314,6 +320,13 @@ class OfficialRepository:
                            "visibility, searchable, deleted, source_article_id "
                            "FROM hs_reg_chunks WHERE revision_id = %s ORDER BY ordinal", (revision_id,))
             return cursor.fetchall()
+
+    def set_official_url(self, revision_id: str, official_url: str) -> int:
+        """본문이 같은 개정의 공식 URL만 교정한다. 청크는 개정 행의 URL을 조인해 쓰므로 검색 결과에 바로 반영된다."""
+        with self.cursor() as cursor:
+            cursor.execute("UPDATE hs_reg_revisions SET official_url = %s WHERE revision_id = %s",
+                           (official_url, revision_id))
+            return cursor.rowcount
 
     def set_visibility(self, regulation_id: str, visibility: str) -> int:
         """규정의 공개 범위를 바꾼다. 청크까지 같은 트랜잭션에서 갱신해 검색에 즉시 반영된다."""
