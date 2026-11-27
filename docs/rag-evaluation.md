@@ -38,4 +38,12 @@ export GEMINI_API_KEY=... GEMINI_MODEL=<현재 지원 모델>   # Groq는 LLM_PR
 python scripts/run_rag_eval.py --mode real --snapshot snapshot.json
 ```
 
+`.env`가 있으면 아직 없는 환경변수만 채운다(`--env-file`로 바꿀 수 있음). 무료 API는 분당 토큰 한도가 있어 사례가 몰리면 한도 초과 오류가 품질 대신 집계된다. Groq 무료(gpt-oss-120b 분당 8K 토큰)라면 사례 사이를 띄우고, 긴 문서가 들어가는 충돌 분석 모델 평가는 따로 돌린다.
+
+```sh
+python scripts/run_rag_eval.py --mode real --pause 20 --skip-conflicts
+```
+
+답변 요약에는 인용 일치·올바른 거절·무근거 답변·지연과 함께 모델 호출·토큰 합계(`usage`)가 나온다.
+
 주의: 실행기는 색인을 비우고 다시 만든다. 일회용 DB에서만 실행하고, 키는 커밋하지 않는다. #17 스냅샷이 나오면 평가셋을 전체 규정(표·부칙·긴 문서·충돌 분석 문서) 기준으로 늘린다.

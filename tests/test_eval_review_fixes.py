@@ -100,6 +100,39 @@ class AnswerEvaluationTests(unittest.TestCase):  # #58
         self.assertNotIn("gsk_secret", json.dumps(result, ensure_ascii=False))
         self.assertEqual(result["summary"]["completed"], 2)
 
+    def test_pause_between_cases_and_usage_totals(self):
+        class Metered(FlakyAnswerer):
+            def answer(self, question, history=None, **kwargs):
+                result = super().answer(question, history, **kwargs)
+                result["usage"] = {"calls": 2, "retries": 1, "input_tokens": 1000, "output_tokens": 300}
+                return result
+
+        waits = []
+        result = ev.evaluate_answers(CASES, Metered(fail_on=(1,)), [{"revision_id": "20:1"}],
+                                     pause=20, sleep=waits.append)
+        self.assertEqual(waits, [20, 20])  # 첫 사례 앞에서는 기다리지 않는다
+        self.assertEqual(result["cases"][1]["usage"], None)  # 오류 사례는 사용량 없음
+        self.assertEqual(result["summary"]["usage"], {"measured": 2, "calls": 4, "retries": 2, "input_tokens": 2000,
+                                                      "output_tokens": 600, "calls_per_case": 2.0})
+        self.assertEqual(ev.evaluate_answers(CASES, FlakyAnswerer(fail_on=()), [{"revision_id": "20:1"}],
+                                             sleep=waits.append)["summary"]["usage"], {"measured": 0})
+        self.assertEqual(len(waits), 2)  # pause 기본값 0이면 기다리지 않는다
+
+    def test_env_file_fills_only_missing_values(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, ".env")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("HSRULE_EVAL_A=from_file\nHSRULE_EVAL_B=from_file\n")
+            with mock.patch.dict(os.environ, {"HSRULE_EVAL_A": "exported"}):
+                self.assertEqual(ev.load_env_file(path), ["HSRULE_EVAL_B"])
+                self.assertEqual(os.environ["HSRULE_EVAL_A"], "exported")
+                self.assertEqual(os.environ["HSRULE_EVAL_B"], "from_file")
+        self.assertEqual(ev.load_env_file("/nonexistent/.env"), [])
+
     def test_all_errors_leave_rates_undefined_not_zero_division(self):
         summary = ev.evaluate_answers(CASES, FlakyAnswerer(fail_on=(0, 1, 2), reason="json"),
                                       [{"revision_id": "20:1"}])["summary"]

@@ -195,11 +195,17 @@ def _case_error(exc) -> dict:
     return {"code": "unexpected_error", "reason": type(exc).__name__}
 
 
-def evaluate_answers(cases, answerer, regulations) -> dict:
-    """답변·인용 평가. 한 사례의 오류·지연을 기록하고 다음 사례를 계속 평가한다(#58)."""
+def evaluate_answers(cases, answerer, regulations, *, pause: float = 0.0, sleep=time.sleep) -> dict:
+    """답변·인용 평가. 한 사례의 오류·지연을 기록하고 다음 사례를 계속 평가한다(#58).
+
+    pause: 사례 사이 대기(초). 무료 API의 분당 토큰 한도(예: Groq 8K TPM) 때문에 사례가 한도 초과로
+    오류 처리되면 품질이 아니라 한도를 재게 되므로, 실제 모델 평가에서는 사례 사이를 띄운다.
+    """
     known_revisions = {r["revision_id"] for r in regulations}
     rows = []
-    for case in cases:
+    for index, case in enumerate(cases):
+        if index and pause > 0:
+            sleep(pause)
         started = time.perf_counter()
         try:
             result = answerer.answer(case["question"], case.get("history"), language=case["language"])
@@ -212,8 +218,11 @@ def evaluate_answers(cases, answerer, regulations) -> dict:
         expected = case.get("expected_articles")
         clarification = (result or {}).get("clarification") or {}
         grounding = (result or {}).get("grounding") or {}
+        usage = (result or {}).get("usage") or {}
         rows.append({"id": case["id"], "type": case["type"], "split": case.get("split"),
                      "error": error, "seconds": round(seconds, 3),
+                     "usage": {key: usage.get(key) for key in ("calls", "retries", "input_tokens", "output_tokens")}
+                     if usage else None,
                      "clarification_asked": clarification.get("needed") if result is not None else None,
                      "expected_clarification": case.get("expected_clarification"),
                      "grounding_verified": grounding.get("verified") if result is not None else None,
@@ -249,8 +258,20 @@ def summarize_answers(rows) -> dict:
         "correct_refusal_rate": (sum(1 for r in unanswerable_done if r["found"] is False) / len(unanswerable))
         if unanswerable else None,
         "latency_seconds": {"p50": percentile(seconds, .5), "p95": percentile(seconds, .95)},
+        "usage": summarize_usage(rows),
         "clarification": summarize_clarification(completed),
         "grounding": summarize_grounding(found)}
+
+
+def summarize_usage(rows) -> dict:
+    """모델 호출·토큰 합계(#76). 무료 한도는 질문 수가 아니라 호출·토큰 기준이라 함께 기록한다."""
+    measured = [r["usage"] for r in rows if r.get("usage")]
+    if not measured:
+        return {"measured": 0}
+    total = {key: sum(int(u.get(key) or 0) for u in measured)
+             for key in ("calls", "retries", "input_tokens", "output_tokens")}
+    return {"measured": len(measured), **total,
+            "calls_per_case": round(total["calls"] / len(measured), 2)}
 
 
 def summarize_clarification(completed) -> dict:
@@ -293,6 +314,21 @@ def load_regulations(args):
     return [dict(DEFAULT_REGULATION, text=text)]
 
 
+def load_env_file(path) -> list[str]:
+    """.env에서 아직 없는 환경변수만 채운다(이미 설정한 값이 우선). 값은 출력하지 않는다."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    from dotenv import dotenv_values
+
+    loaded = []
+    for key, value in dotenv_values(path).items():
+        if value and not os.environ.get(key):
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("standin", "real"), required=True)
@@ -303,7 +339,15 @@ def main():
     parser.add_argument("--out", default=str(ROOT / "eval/results"))
     parser.add_argument("--split", choices=("all", "tune", "holdout"), default="all",
                         help="평가할 사례 묶음(#77). 조정 중에는 tune만, 최종 판정은 holdout으로 확인한다.")
+    parser.add_argument("--pause", type=float, default=0.0,
+                        help="real 모드 답변 사례 사이 대기(초). Groq 무료(분당 8K 토큰)는 20 정도를 권한다(사례당 약 2~2.5K 토큰)")
+    parser.add_argument("--skip-conflicts", action="store_true",
+                        help="충돌 분석 모델 평가를 건너뛴다(긴 문서는 무료 분당 토큰 한도를 넘기 쉽다)")
+    parser.add_argument("--env-file", default=str(ROOT / ".env"), help="읽을 .env(이미 설정한 환경변수가 우선)")
     args = parser.parse_args()
+    loaded = load_env_file(args.env_file)
+    if loaded:
+        print(".env에서 읽은 설정:", ", ".join(sorted(loaded)))
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL(일회용 PostgreSQL)이 필요합니다. 평가는 색인을 비우고 다시 만듭니다.")
@@ -364,7 +408,10 @@ def main():
     regressions = run_regressions(repository, embeddings, retriever, regulations)
     stage_errors = []
     try:
-        conflicts = conflict_evaluation(Path(args.conflict_eval), retriever, llm)
+        conflicts = (conflict_evaluation(Path(args.conflict_eval), retriever, None) if args.skip_conflicts
+                     else conflict_evaluation(Path(args.conflict_eval), retriever, llm))
+        if args.skip_conflicts and llm is not None:
+            not_measured["conflict_quality"] = "--skip-conflicts: 충돌 지적 정확도는 측정하지 않고 후보 재현율만 기록"
     except Exception as exc:  # 예상하지 못한 오류도 이미 계산한 검색 결과 저장을 막지 않는다(#58).
         stage_errors.append({"stage": "conflicts", "error": type(exc).__name__})
         conflicts = {"cases": 0, "candidate_recall_mean": None, "errors": 1, "per_case": []}
@@ -376,7 +423,8 @@ def main():
     else:
         from hsrule.answering import CitedAnswerer
         try:
-            answers = evaluate_answers(cases, CitedAnswerer(llm, retriever, k=settings.retrieval_k), regulations)
+            answers = evaluate_answers(cases, CitedAnswerer(llm, retriever, k=settings.retrieval_k), regulations,
+                                       pause=args.pause)
         except Exception as exc:
             stage_errors.append({"stage": "answers", "error": type(exc).__name__})
             not_measured["answer_quality"] = f"답변 평가 중 예상하지 못한 오류로 중단됨: {type(exc).__name__}"
@@ -420,6 +468,12 @@ def main():
     print(json.dumps({"regressions": result["regressions"]["all_passed"],
                       "conflict_candidate_recall": result["conflicts"]["candidate_recall_mean"]},
                      ensure_ascii=False))
+    if answers:
+        summary = answers["summary"]
+        print(json.dumps({"answers": {key: summary[key] for key in (
+            "cases", "completed", "errors", "error_reasons", "citation_match_rate", "correct_refusal_rate",
+            "unsupported_answer_rate", "latency_seconds", "usage", "clarification", "grounding")}},
+            ensure_ascii=False))
     print("저장:", path)
 
 
