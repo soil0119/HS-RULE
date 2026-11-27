@@ -26,7 +26,7 @@ class RegulationAdapter:
 
 
 def create_regulation_adapter(repository, embeddings=None, settings=None, llm=None) -> RegulationAdapter:
-    """설정(GROQ_MODEL 등)과 저장소로 어댑터를 만든다. 테스트에서는 llm·embeddings를 주입한다."""
+    """설정(LLM_PROVIDER·GEMINI_MODEL·GROQ_MODEL 등)과 저장소로 어댑터를 만든다. 테스트에서는 llm·embeddings를 주입한다."""
     from hsrule.embeddings import LocalEmbeddings
     from hsrule.official_retrieval import HybridRetriever
     from hsrule.rag_config import RagSettings, create_llm

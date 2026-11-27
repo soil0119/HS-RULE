@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from hsrule.chains import ANSWER_SYSTEM, ChainTimeout, RegulationChain, label_documents
+from hsrule.rag_config import message_text
 
 REFUSAL = {
     "ko": "제공된 공식 규정에서 이 질문에 해당하는 근거를 찾지 못했습니다. 담당 부서에 문의해 주세요.",
@@ -124,7 +125,7 @@ class CitedAnswerer:
         last_error = None
         for _ in range(self.max_parse_attempts):
             try:
-                text = self.llm.invoke(messages).content
+                text = message_text(self.llm.invoke(messages).content)
             except ChainTimeout as exc:
                 raise RagError("rag_backend_error", "답변 모델이 시간 안에 응답하지 않았습니다.", "timeout") from exc
             except TimeoutError as exc:
@@ -133,7 +134,7 @@ class CitedAnswerer:
                 # provider 예외 본문에는 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "답변 모델 호출에 실패했습니다.", "provider") from exc
             try:
-                return ModelAnswer.model_validate(extract_json(text if isinstance(text, str) else str(text)))
+                return ModelAnswer.model_validate(extract_json(text))
             except (ValueError, ValidationError) as exc:
                 last_error = exc
                 messages = messages + [HumanMessage("형식 오류: 지정한 JSON 객체만 다시 출력하라. " + str(exc)[:200])]

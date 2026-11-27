@@ -4,7 +4,7 @@
 
 - standin: 결정적 대역 임베딩(문자 2-gram 해시)으로 파이프라인(조항 번호·키워드·결합 순위·필터)만 점검한다.
   모델 품질에 대한 주장이 아니며 답변 지표는 측정하지 않는다.
-- real: 실제 임베딩(LocalEmbeddings)과 Groq 모델(GROQ_API_KEY, GROQ_MODEL)로 답변·인용 지표까지 측정한다.
+- real: 실제 임베딩(LocalEmbeddings)과 LLM(기본 Gemini: GEMINI_API_KEY, GEMINI_MODEL / LLM_PROVIDER=groq면 GROQ_*)로 답변·인용 지표까지 측정한다.
 측정하지 못한 값은 결과 JSON의 not_measured에 사유와 함께 적고, 수치를 임의로 채우지 않는다.
 """
 import argparse
@@ -230,8 +230,8 @@ def main():
 
     answers = None
     if llm is None:
-        not_measured["answer_quality"] = "실제 Groq 모델이 없는 standin 모드: 인용 일치·무근거 답변·거절은 측정하지 않음"
-        not_measured["conflict_quality"] = "실제 Groq 모델이 없는 standin 모드: 충돌 지적 정확도는 측정하지 않고 후보 재현율만 기록"
+        not_measured["answer_quality"] = "실제 LLM이 없는 standin 모드: 인용 일치·무근거 답변·거절은 측정하지 않음"
+        not_measured["conflict_quality"] = "실제 LLM이 없는 standin 모드: 충돌 지적 정확도는 측정하지 않고 후보 재현율만 기록"
     else:
         from hsrule.answering import CitedAnswerer, RagError
         answerer = CitedAnswerer(llm, retriever, k=settings.retrieval_k)
@@ -271,7 +271,7 @@ def main():
     result = {
         "mode": args.mode,
         "claim": ("대역 임베딩으로 파이프라인만 점검한 결과이며 모델 품질을 뜻하지 않는다." if args.mode == "standin"
-                  else "실제 임베딩·Groq 모델로 측정한 결과."),
+                  else "실제 임베딩·LLM으로 측정한 결과."),
         "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "versions": {
             "git_commit": git_commit(), "python": platform.python_version(),
@@ -280,7 +280,8 @@ def main():
             "eval_set_sha256": hashlib.sha256(Path(args.eval).read_bytes()).hexdigest(), "eval_cases": len(cases),
             "embedding_model": embeddings.model_name, "chunk_params": {"max_tokens": 128, "overlap_tokens": 16},
             "tokenizer": type(embeddings.tokenizer).__name__ if args.mode == "standin" else embeddings.model_name,
-            "groq_model": settings.groq_model if settings else None,
+            "llm_provider": settings.provider if settings else None,
+            "llm_model": settings.model if settings else None,
             "prompt_sha256": hashlib.sha256(Path(ROOT / "hsrule/chains.py").read_bytes() +
                                             Path(ROOT / "hsrule/answering.py").read_bytes()).hexdigest()},
         "retrieval": {"hybrid": retrieval_metrics(rows["hybrid"]), "keyword_only": retrieval_metrics(rows["keyword_only"]),

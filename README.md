@@ -6,7 +6,7 @@
 현재 공개 UI: **[hs.officeworkkit.com](https://hs.officeworkkit.com)**. 새 UI만 Cloudflare에 배포했으며, 질문·로그인·문서 처리 API와 RAG는 후속 연결 대상입니다. [배포·재배포 안내](docs/deployment.md)를 참고하세요.
 
 첨부 프로젝트 `Hansung_AX-update_crawler.zip`을 기반으로 구성했습니다.
-FastAPI·HTML 화면, Groq 답변 생성, 로컬 문장 임베딩, PostgreSQL/pgvector를 사용합니다.
+FastAPI·HTML 화면, Groq(또는 Gemini) 답변 생성, 로컬 문장 임베딩, PostgreSQL/pgvector를 사용합니다.
 
 ## 로컬 실행
 
@@ -26,7 +26,9 @@ Windows PowerShell에서는 가상환경 활성화에 `.venv\Scripts\Activate.ps
 
 | 변수 | 용도 |
 |---|---|
-| `GROQ_API_KEY` | 본인 Groq API 키. 미설정 시 서버를 시작할 수 없습니다. |
+| `LLM_PROVIDER` | RAG 답변 LLM 제공자(`groq` 기본, `gemini`). |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Groq 사용 시 필요한 API 키와 모델명(가입하면 바로 무료 한도 사용). |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | `LLM_PROVIDER=gemini`일 때만 필요합니다. Gemini 무료 등급은 프로젝트별로 자격이 갈려 보장되지 않습니다. |
 | `DATABASE_URL` | 로컬 PostgreSQL 연결 주소 |
 | `POSTGRES_PASSWORD` | Compose DB 비밀번호. `DATABASE_URL`의 비밀번호와 일치시킵니다. |
 | `ADMIN_ID`, `ADMIN_PW` | 규정 업로드용 관리자 계정. 예시 비밀번호를 교체합니다. |
@@ -47,7 +49,7 @@ uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 - `hansung_rules.json`에는 원본에 포함된 규정 315건이 있습니다. 첫 실행 때 재수집할 필요는 없습니다.
 - 임베딩 모델 `paraphrase-multilingual-MiniLM-L12-v2`는 처음 실행할 때 다운로드됩니다.
 - `build_db.py`는 **기존 `rule_chunks` 테이블을 삭제하고 다시 만듭니다.** 업로드 규정이 있는 DB에서는 백업 후 실행합니다.
-- Groq API를 호출하는 검색·충돌 분석에는 유효한 API 키와 해당 계정의 모델 접근 권한이 필요합니다.
+- LLM API(Gemini·Groq)를 호출하는 검색·충돌 분석에는 유효한 API 키와 해당 계정의 모델 접근 권한이 필요합니다.
 - DB는 로컬 `127.0.0.1:5432`에 바인딩합니다. 이미 해당 포트를 쓰고 있다면 Compose 포트와 `DATABASE_URL`을 함께 변경합니다.
 
 ## 프로젝트 구성
