@@ -30,7 +30,9 @@
 | 질의 길이 | `MAX_QUERY_CHARS` = 2,000자 (웹 API 질문 한도와 같다) | 같음 |
 | DB 질의 시간 | `SEARCH_TIMEOUT_MS` = 5,000ms (`statement_timeout`) | `hsrule/official_repository.py` |
 | HNSW 탐색 폭 | `hnsw.ef_search` = 200 | 같음 |
-| 문맥 토큰 | 기본 2,048 토큰, 초과분은 하위 근거부터 제외 | `hsrule/chains.py` (#27) |
+| 문맥 토큰 | 이력+근거 합계 `MAX_CONTEXT_TOKENS` = 2,048 토큰(임베딩 토크나이저 기준 추정). 이력은 그중 `HISTORY_SHARE` = 절반까지만 쓰고 오래된 메시지부터 버리며, 가장 최근 한 건이 넘치면 잘라 쓴다. 근거는 남은 예산 안에서 하위 근거부터 제외한다. 시스템 지시는 고정, 질문은 2,000자 이하라 요청 전체가 이 범위로 제한된다. 출력은 토큰으로 자르지 않고 답변 길이 검증(6,000자)으로 제한한다. | `hsrule/chains.py` (#27·#50) |
+| 요청 시간 | 질문 재작성·답변·형식 재시도가 `MAX_TOTAL_SECONDS` = 120초를 함께 쓴다. 충돌 분석은 300초를 검색·모델·재시도가 함께 쓴다. 남은 시간이 `MIN_CALL_SECONDS` = 1초 미만이면 새 호출을 시작하지 않고, 남은 시간을 호출별 timeout으로 넘긴다. | `hsrule/chains.py`, `hsrule/conflict.py` (#51) |
+| 모델 재시도 | provider 자체 재시도는 끄고, 429·5xx·연결 실패만 `MODEL_ATTEMPTS` = 3회 안에서 남은 시간이 허락할 때 다시 시도한다(Retry-After 우선, 없으면 0.5·1초…최대 8초 대기). 시간 초과는 다시 시도하지 않는다. | `hsrule/chains.py`, `hsrule/rag_config.py` (#51) |
 | 근거 없음 | 조항 일치·키워드 일치가 없고 코사인 유사도가 `MIN_COSINE` = 0.25 미만이면 후보에서 제외. 남은 후보가 없으면 근거 없음으로 처리하고 모델을 호출하지 않는다. | `hsrule/official_retrieval.py`, `hsrule/answering.py` |
 
 평가셋(`eval/regulation_eval.jsonl`)에 정확 조항·동의어·짧은 질문·부정확한 규정명·후속 질문·근거 없음·삭제 조항 회귀가 들어 있고, `scripts/run_rag_eval.py`가 Recall@k·MRR과 검색 지연 p50/p95를 기록한다. 기준값을 바꾸면 이 표와 평가 결과를 함께 갱신한다.

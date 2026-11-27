@@ -57,7 +57,8 @@ def create_llm(settings: RagSettings):
     if settings.provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        options = {"model": settings.model, "google_api_key": settings.api_key, "max_retries": 2, "timeout": 60}
+        # provider 자체 재시도는 끈다(attempts=1). 재시도는 요청 마감을 아는 hsrule.chains.invoke_within이 맡는다(#51).
+        options = {"model": settings.model, "google_api_key": settings.api_key, "max_retries": 1, "timeout": 60}
         generation = _gemini_generation(settings.model)
         # Gemini 3 이후 모델은 Google이 기본 temperature 유지를 권고한다(낮추면 반복·품질 저하 가능).
         # 이 경우 값을 넘기지 않아 라이브러리 기본값을 따른다.
@@ -67,7 +68,7 @@ def create_llm(settings: RagSettings):
     from langchain_groq import ChatGroq
 
     return ChatGroq(model=settings.model, api_key=settings.api_key,
-                    temperature=settings.temperature, max_retries=2, timeout=60)
+                    temperature=settings.temperature, max_retries=0, timeout=60)
 
 
 def message_text(content) -> str:

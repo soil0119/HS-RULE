@@ -9,8 +9,7 @@ import re
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
-from hsrule.chains import ANSWER_SYSTEM, ChainTimeout, RegulationChain, label_documents
-from hsrule.rag_config import message_text
+from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_timeout_error, label_documents
 
 REFUSAL = {
     "ko": "제공된 공식 규정에서 이 질문에 해당하는 근거를 찾지 못했습니다. 담당 부서에 문의해 주세요.",
@@ -100,10 +99,10 @@ class CitedAnswerer:
             state = self.chain.prepare(question, messages, include_private=include_private, language=language)
         except ValueError:
             raise
-        except ChainTimeout as exc:
-            raise RagError("rag_backend_error", "검색 또는 질문 재작성이 시간 안에 끝나지 않았습니다.",
-                           "timeout") from exc
         except Exception as exc:
+            if is_timeout_error(exc):  # 마감 도달·provider 시간 초과 모두 시간 초과로 구분한다.
+                raise RagError("rag_backend_error", "검색 또는 질문 재작성이 시간 안에 끝나지 않았습니다.",
+                               "timeout") from exc
             raise RagError("rag_backend_error", "검색 단계에서 오류가 발생했습니다.", "provider") from exc
         docs = state["docs"]
         if not docs:  # 근거 후보가 없으면 모델을 부르지 않고 거절한다(근거 없음).
@@ -125,12 +124,10 @@ class CitedAnswerer:
         last_error = None
         for _ in range(self.max_parse_attempts):
             try:
-                text = message_text(self.llm.invoke(messages).content)
-            except ChainTimeout as exc:
-                raise RagError("rag_backend_error", "답변 모델이 시간 안에 응답하지 않았습니다.", "timeout") from exc
-            except TimeoutError as exc:
-                raise RagError("rag_backend_error", "답변 모델이 시간 안에 응답하지 않았습니다.", "timeout") from exc
+                text = self.chain.call_model(state, messages)
             except Exception as exc:
+                if is_timeout_error(exc):
+                    raise RagError("rag_backend_error", "답변 모델이 시간 안에 응답하지 않았습니다.", "timeout") from exc
                 # provider 예외 본문에는 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "답변 모델 호출에 실패했습니다.", "provider") from exc
             try:

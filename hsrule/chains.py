@@ -4,17 +4,23 @@ from typing import Any
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+
+from hsrule.rag_config import message_text
 
 LANGUAGES = ("ko", "en")
 # 입력·문맥·시간 상한 (#27). 바꾸면 docs/rag-retrieval.md의 상한 표도 함께 고친다.
 MAX_HISTORY_CHARS = 4000   # 이력 한 건의 길이 상한 (웹 API 계약과 같다)
 MAX_QUESTION_CHARS = 2000  # 질문 길이 상한 (웹 API 계약과 같다)
-MAX_CONTEXT_TOKENS = 2048  # 근거+이력에 허용할 문맥 토큰 상한 (추정)
+MAX_CONTEXT_TOKENS = 2048  # 이력+근거가 함께 쓰는 문맥 토큰 상한 (추정)
+HISTORY_SHARE = 0.5        # 문맥 상한 중 이력이 쓸 수 있는 최대 비율. 나머지는 항상 근거 몫으로 남는다 (#50)
 MAX_TOTAL_SECONDS = 120    # 한 질의가 외부 모델 호출에 쓸 수 있는 전체 시간
+MIN_CALL_SECONDS = 1.0     # 남은 시간이 이보다 적으면 모델 호출(재시도 포함)을 새로 시작하지 않는다 (#51)
+MODEL_ATTEMPTS = 3         # 일시 오류(429·5xx·연결 실패)에 대한 재시도를 포함한 모델 호출 시도 수 (#51)
+MAX_BACKOFF_SECONDS = 8.0
+RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 CONDENSE_SYSTEM = (
     "대화 이력과 마지막 질문이 주어진다. 이력 없이도 이해되는 한국어 검색 질문 한 문장으로 바꿔 쓴다. "
@@ -123,8 +129,109 @@ def fit_context(docs: list[Document], language: str, budget: int, count) -> tupl
     return kept, len(docs) - len(kept)
 
 
+def fit_history(history: list, budget: int, count) -> tuple[list, int]:
+    """최근 대화부터 예산 안에 남긴다(#50). 가장 최근 한 건도 넘치면 그 한 건을 잘라 남긴다.
+
+    반환: (남긴 메시지, 사용한 토큰 추정). 오래된 메시지부터 버리며 중간을 건너뛰지 않는다.
+    """
+    kept, used = [], 0
+    for message in reversed(history):
+        text = str(message.content)
+        cost = count(text)
+        if used + cost <= budget:
+            kept.append(message)
+            used += cost
+            continue
+        if not kept and budget > 0 and text:
+            keep = max(1, int(len(text) * budget / cost))
+            while keep > 1 and count(text[:keep]) > budget:
+                keep = int(keep * 0.9)
+            cut = text[:keep]
+            if count(cut) <= budget:
+                kept.append(type(message)(cut))
+                used += count(cut)
+        break
+    kept.reverse()
+    return kept, used
+
+
 class ChainTimeout(RuntimeError):
     """한 질의에 허용된 시간을 넘겼다."""
+
+
+class DeadlineReached(ChainTimeout):
+    """요청 마감이 가까워 모델 호출을 새로 시작하지 않았다(#51)."""
+
+
+def _error_chain(exc):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def is_timeout_error(exc) -> bool:
+    """provider·HTTP 라이브러리의 시간 초과 예외도 시간 초과로 본다(httpx·groq·google-genai는 TimeoutError가 아니다)."""
+    return any(isinstance(item, (TimeoutError, ChainTimeout)) or "timeout" in type(item).__name__.lower()
+               for item in _error_chain(exc))
+
+
+def _status_code(exc) -> int | None:
+    for item in _error_chain(exc):
+        for attribute in ("status_code", "code"):
+            value = getattr(item, attribute, None)
+            if isinstance(value, int) and 100 <= value < 600:
+                return value
+    return None
+
+
+def is_retryable_error(exc) -> bool:
+    """429·5xx·연결 실패만 다시 시도한다. 시간 초과는 남은 시간을 이미 다 썼으므로 다시 시도하지 않는다."""
+    if is_timeout_error(exc):
+        return False
+    status = _status_code(exc)
+    if status is not None:
+        return status in RETRYABLE_STATUS
+    return any("connect" in type(item).__name__.lower() for item in _error_chain(exc))
+
+
+def _retry_after(exc) -> float | None:
+    for item in _error_chain(exc):
+        headers = getattr(getattr(item, "response", None), "headers", None)
+        try:
+            value = headers.get("retry-after") if headers is not None else None
+            return float(value) if value is not None else None
+        except (TypeError, ValueError, AttributeError):
+            return None
+    return None
+
+
+def invoke_within(llm, messages, remaining, *, sleep=time.sleep, attempts: int = MODEL_ATTEMPTS) -> str:
+    """요청 마감 안에서 모델을 호출하고 응답 문자열을 돌려준다(#51).
+
+    - 호출·재시도 직전에 남은 시간을 확인하고, MIN_CALL_SECONDS보다 적으면 DeadlineReached를 낸다.
+    - 남은 시간을 호출별 timeout으로 넘긴다(provider 자체 재시도는 create_llm에서 끈다).
+    - 429·5xx·연결 실패만 남은 시간 안에서 다시 시도한다. 대기(Retry-After 또는 지수 대기)가 마감을 넘기면
+      기다리지 않고 원래 오류를 올린다.
+    """
+    for attempt in range(1, attempts + 1):
+        left = remaining()
+        if left < MIN_CALL_SECONDS:
+            raise DeadlineReached("질의에 허용된 시간을 넘겼습니다.")
+        bound = llm.bind(timeout=left) if hasattr(llm, "bind") else llm
+        try:
+            return message_text(bound.invoke(messages).content)
+        except Exception as exc:
+            if attempt == attempts or not is_retryable_error(exc):
+                raise
+            wait = _retry_after(exc)  # provider가 알려 준 대기 시간은 줄이지 않는다(일찍 다시 보내면 또 거부된다).
+            if wait is None:
+                wait = min(MAX_BACKOFF_SECONDS, 0.5 * 2 ** (attempt - 1))
+            if remaining() - wait < MIN_CALL_SECONDS:
+                raise
+            sleep(wait)
+    raise AssertionError("unreachable")
 
 
 class RegulationChain:
@@ -132,14 +239,13 @@ class RegulationChain:
 
     def __init__(self, llm, searcher, *, k: int = 6, history_limit: int = 12,
                  max_context_tokens: int = MAX_CONTEXT_TOKENS, max_total_seconds: float = MAX_TOTAL_SECONDS,
-                 token_counter=None, clock=time.monotonic):
+                 token_counter=None, clock=time.monotonic, sleep=time.sleep):
         self.llm, self.searcher, self.k, self.history_limit = llm, searcher, k, history_limit
         self.max_context_tokens, self.max_total_seconds = max_context_tokens, max_total_seconds
         self.count_tokens = token_counter or make_token_counter(searcher)
-        self.clock = clock
-        condense_prompt = ChatPromptTemplate.from_messages(
+        self.clock, self.sleep = clock, sleep
+        self._condense_prompt = ChatPromptTemplate.from_messages(
             [("system", CONDENSE_SYSTEM), MessagesPlaceholder("history"), ("human", "{question}")])
-        self._condense = condense_prompt | llm | StrOutputParser()
         self._answer_prompt = ChatPromptTemplate.from_messages([
             ("system", "{system}\n\n[근거 / Evidence]\n{evidence}"),
             MessagesPlaceholder("history"), ("human", "{question}")])
@@ -154,39 +260,48 @@ class RegulationChain:
     def _search_query(self, inputs: dict) -> str:
         if not inputs["history"]:
             return inputs["question"]
-        self._check_deadline(inputs)
-        rewritten = self._condense.invoke({"history": inputs["history"], "question": inputs["question"]}).strip()
+        messages = self._condense_prompt.format_messages(history=inputs["history"], question=inputs["question"])
+        rewritten = self.call_model(inputs, messages).strip()
         return rewritten or inputs["question"]
 
     def _retrieve(self, inputs: dict) -> list[Document]:
         retriever = RegulationRetriever(searcher=self.searcher, include_private=inputs["include_private"],
                                         k=self.k)
         docs = label_documents(retriever.invoke(inputs["search_query"]))
-        history_cost = sum(self.count_tokens(str(message.content)) for message in inputs["history"])
-        budget = max(0, self.max_context_tokens - history_cost)
-        kept, dropped = fit_context(docs, inputs["language"], budget, self.count_tokens)
+        kept, dropped = fit_context(docs, inputs["language"], inputs["evidence_budget"], self.count_tokens)
         inputs["dropped_for_context"] = dropped
         return kept
 
-    def _check_deadline(self, inputs: dict) -> None:
-        if self.clock() - inputs["started_at"] > self.max_total_seconds:
-            raise ChainTimeout("질의에 허용된 시간을 넘겼습니다.")
+    def remaining_seconds(self, inputs: dict) -> float:
+        return self.max_total_seconds - (self.clock() - inputs["started_at"])
+
+    def call_model(self, inputs: dict, messages: list) -> str:
+        """재작성·답변·형식 재시도 등 모든 모델 호출이 같은 요청 마감을 공유한다(#51)."""
+        return invoke_within(self.llm, messages, lambda: self.remaining_seconds(inputs), sleep=self.sleep)
 
     def _generate(self, inputs: dict) -> str:
-        self._check_deadline(inputs)
-        return (self._answer_prompt | self.llm | StrOutputParser()).invoke({
-            "system": ANSWER_SYSTEM[inputs["language"]], "evidence": inputs["evidence"],
-            "history": inputs["history"], "question": inputs["question"]})
+        return self.call_model(inputs, self._answer_prompt.format_messages(
+            system=ANSWER_SYSTEM[inputs["language"]], evidence=inputs["evidence"],
+            history=inputs["history"], question=inputs["question"]))
 
-    def prepare(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
-                language: str = "ko") -> dict:
-        """답변 생성 전까지(검색 질문 → 검색 → 근거 문자열)만 실행한다."""
+    def _new_state(self, question: str, messages: list[dict] | None, include_private: bool, language: str) -> dict:
+        """prepare와 invoke가 공유하는 요청 상태. 시작 시각을 한 번 기록하고 문맥 예산을 나눈다(#49·#50)."""
         if language not in LANGUAGES:
             raise ValueError("language는 ko 또는 en이어야 합니다.")
         if not question.strip():
             raise ValueError("질문이 비어 있습니다.")
-        inputs = {"question": question.strip()[:2000], "history": to_messages(messages, self.history_limit),
-                  "include_private": include_private, "language": language}
+        # 요청 예산(#50): 시스템 지시는 고정, 질문은 MAX_QUESTION_CHARS자 이하, 이력+근거는 max_context_tokens 이하.
+        # 이력은 그중 HISTORY_SHARE까지만 쓰므로 긴 대화가 근거를 모두 밀어내지 못한다.
+        history, history_cost = fit_history(to_messages(messages, self.history_limit),
+                                            int(self.max_context_tokens * HISTORY_SHARE), self.count_tokens)
+        return {"question": question.strip()[:MAX_QUESTION_CHARS], "history": history,
+                "include_private": include_private, "language": language, "started_at": self.clock(),
+                "dropped_for_context": 0, "evidence_budget": max(0, self.max_context_tokens - history_cost)}
+
+    def prepare(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
+                language: str = "ko") -> dict:
+        """답변 생성 전까지(검색 질문 → 검색 → 근거 문자열)만 실행한다."""
+        inputs = self._new_state(question, messages, include_private, language)
         inputs["search_query"] = self._search_query(inputs)
         inputs["docs"] = self._retrieve(inputs)
         inputs["evidence"] = format_evidence(inputs["docs"], language)
@@ -194,11 +309,4 @@ class RegulationChain:
 
     def invoke(self, question: str, messages: list[dict] | None = None, *, include_private: bool = False,
                language: str = "ko") -> dict:
-        if language not in LANGUAGES:
-            raise ValueError("language는 ko 또는 en이어야 합니다.")
-        if not question.strip():
-            raise ValueError("질문이 비어 있습니다.")
-        return self.chain.invoke({
-            "question": question.strip()[:MAX_QUESTION_CHARS],
-            "history": to_messages(messages, self.history_limit), "include_private": include_private,
-            "language": language, "started_at": self.clock(), "dropped_for_context": 0})
+        return self.chain.invoke(self._new_state(question, messages, include_private, language))

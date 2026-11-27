@@ -10,8 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
 
 from hsrule.answering import RagError, extract_json
-from hsrule.chains import ChainTimeout
-from hsrule.rag_config import message_text
+from hsrule.chains import MIN_CALL_SECONDS, DeadlineReached, invoke_within, is_timeout_error
 
 MAX_TEXT_CHARS = 100_000   # 웹 API의 추출 텍스트 한도와 같다
 PASSAGE_CHARS = 600        # 문단 하나의 길이 상한
@@ -90,14 +89,18 @@ def _excerpt(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+class _DeadlineExceeded(Exception):
+    """충돌 분석 전체 마감을 넘겨 새 검색·모델 호출을 시작하지 않는다(#51)."""
+
+
 class ConflictAnalyzer:
     def __init__(self, llm, searcher, *, per_passage: int = 3, max_batches: int = MAX_BATCHES,
                  batch_chars: int = BATCH_CHARS, max_parse_attempts: int = 2,
-                 max_total_seconds: float = MAX_TOTAL_SECONDS, clock=time.monotonic):
+                 max_total_seconds: float = MAX_TOTAL_SECONDS, clock=time.monotonic, sleep=time.sleep):
         self.llm, self.searcher = llm, searcher
         self.per_passage, self.max_batches = per_passage, max_batches
         self.batch_chars, self.max_parse_attempts = batch_chars, max_parse_attempts
-        self.max_total_seconds, self.clock = max_total_seconds, clock
+        self.max_total_seconds, self.clock, self.sleep = max_total_seconds, clock, sleep
 
     @property
     def limits(self) -> dict:
@@ -120,35 +123,45 @@ class ConflictAnalyzer:
                  "truncated": len(batches) > self.max_batches, "dropped_findings": 0,
                  "dropped_recommendations": 0, "stopped_for_time": False, "limits": self.limits}
         started = self.clock()
-        conflicts, summaries, recommendations = [], [], []
+        conflicts, recommendations = [], []
         for batch in batches[:self.max_batches]:
-            if self.clock() - started > self.max_total_seconds:
+            try:
+                result = self._analyze_batch(batch, include_private, language, scope, started)
+            except _DeadlineExceeded:
                 scope["stopped_for_time"] = True
                 scope["truncated"] = True
                 break
-            result = self._analyze_batch(batch, include_private, language, scope)
             if result is None:
                 continue
             batch_result, evidence = result
-            summaries.append(batch_result.summary.strip())
             conflicts.extend(self._accept(batch_result, evidence, language, scope))
             recommendations.extend(self._accept_recommendations(batch_result, evidence, scope))
         scope["characters_analyzed"] = sum(len(t) for _, t in passages[:scope["passages_analyzed"]])
         unique = {item["text"]: item for item in recommendations}
-        return {"filename": filename, "summary": self._summary(scope, conflicts, summaries, language),
+        return {"filename": filename, "summary": self._summary(scope, conflicts, language),
                 "conflicts": conflicts, "recommendations": list(unique.values())[:10], "scope": scope}
 
-    def _analyze_batch(self, batch, include_private, language, scope):
-        candidates, per_passage = {}, {}
+    def _remaining(self, started) -> float:
+        return self.max_total_seconds - (self.clock() - started)
+
+    def _check_deadline(self, started) -> None:
+        if self._remaining(started) < MIN_CALL_SECONDS:
+            raise _DeadlineExceeded()
+
+    def _analyze_batch(self, batch, include_private, language, scope, started):
+        """배치 하나를 분석한다. 마감으로 중단되면 이 배치의 문단은 검토한 것으로 세지 않는다(#51)."""
+        candidates, per_passage, without = {}, {}, 0
         for number, passage in batch:
+            self._check_deadline(started)  # 배치 안의 검색마다 마감을 검사한다.
             hits = self._search(passage, include_private)
             per_passage[number] = [hit["id"] for hit in hits]
             if not hits:
-                scope["passages_without_candidates"] += 1
+                without += 1
             for hit in hits:
                 candidates.setdefault(hit["id"], hit)
-        scope["passages_analyzed"] += len(batch)
-        if not candidates:
+        if not candidates:  # 비교할 후보가 없으면 모델 없이 끝난다(판단하지 않은 문단으로 남긴다).
+            scope["passages_analyzed"] += len(batch)
+            scope["passages_without_candidates"] += without
             return None
         cand_labels = {hit_id: f"C{i}" for i, hit_id in enumerate(candidates, 1)}
         by_cand = {cand_labels[i]: hit for i, hit in candidates.items()}
@@ -158,7 +171,9 @@ class ConflictAnalyzer:
             for label, hit in by_cand.items())
         messages = [SystemMessage(SYSTEM[language] + FORMAT),
                     HumanMessage(f"[규정 후보]\n{cand_blocks}\n\n[문서 문단]\n{passage_blocks}")]
-        parsed = self._ask(messages)
+        parsed = self._ask(messages, started)
+        scope["passages_analyzed"] += len(batch)
+        scope["passages_without_candidates"] += without
         scope["batches_analyzed"] += 1
         evidence = {"passages": dict(batch), "candidates": by_cand,
                     "pairs": {(f"P{n}", cand_labels[i]) for n, ids in per_passage.items() for i in ids}}
@@ -167,15 +182,20 @@ class ConflictAnalyzer:
     def _search(self, passage, include_private):
         return self.searcher.search(passage[:500], include_private=include_private, k=self.per_passage)
 
-    def _ask(self, messages) -> BatchResult:
+    def _ask(self, messages, started) -> BatchResult:
+        """모델 호출과 형식 재시도가 같은 마감을 공유한다. 마감으로 끝나면 _DeadlineExceeded로 부분 결과를 남긴다."""
         last = None
         for _ in range(self.max_parse_attempts):
             try:
-                text = message_text(self.llm.invoke(messages).content)
-            except (ChainTimeout, TimeoutError) as exc:
-                raise RagError("rag_backend_error", "충돌 분석 모델이 시간 안에 응답하지 않았습니다.",
-                               "timeout") from exc
+                text = invoke_within(self.llm, messages, lambda: self._remaining(started), sleep=self.sleep)
+            except DeadlineReached as exc:
+                raise _DeadlineExceeded() from exc
             except Exception as exc:
+                if is_timeout_error(exc):
+                    if self._remaining(started) < MIN_CALL_SECONDS:  # 마감까지 기다리다 끝났다.
+                        raise _DeadlineExceeded() from exc
+                    raise RagError("rag_backend_error", "충돌 분석 모델이 시간 안에 응답하지 않았습니다.",
+                                   "timeout") from exc
                 # provider 예외 본문에는 문서 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "충돌 분석 모델 호출에 실패했습니다.", "provider") from exc
             try:
@@ -224,18 +244,24 @@ class ConflictAnalyzer:
         return accepted
 
     @staticmethod
-    def _summary(scope, conflicts, summaries, language) -> str:
+    def _summary(scope, conflicts, language) -> str:
+        """요약은 검증을 통과한 지적과 처리 범위로만 만든다(#52). 검증 전 모델 요약은 쓰지 않는다."""
         done, total = scope["passages_analyzed"], scope["passages_total"]
         if language == "ko":
             head = f"문단 {total}개 중 {done}개를 검토했고 충돌 가능성 {len(conflicts)}건을 찾았습니다."
-            if scope["truncated"]:
+            if scope["stopped_for_time"]:
+                head += " 시간 한도로 분석을 중단해 일부 문단은 검토하지 못했습니다."
+            elif scope["truncated"]:
                 head += " 분량 한도로 일부 문단은 검토하지 못했습니다."
             if scope["passages_without_candidates"]:
                 head += f" {scope['passages_without_candidates']}개 문단은 비교할 규정 후보가 없어 판단하지 않았습니다."
         else:
             head = f"Reviewed {done} of {total} passages and found {len(conflicts)} possible conflict(s)."
-            if scope["truncated"]:
+            if scope["stopped_for_time"]:
+                head += " Analysis stopped at the time limit, so some passages were not reviewed."
+            elif scope["truncated"]:
                 head += " Some passages were not reviewed because of the size limit."
             if scope["passages_without_candidates"]:
                 head += f" {scope['passages_without_candidates']} passage(s) had no regulation candidates and were not judged."
-        return " ".join([head] + [s for s in summaries if s][:3])
+        details = [f"{c['regulation']} {c['article']}: {c['issue']}" for c in conflicts[:3]]
+        return " ".join([head] + details)
