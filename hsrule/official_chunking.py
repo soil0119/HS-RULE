@@ -4,12 +4,16 @@
 규정/개정 ID·공식 URL·조항 ID·원문 범위(source_start/source_end)만 유지한다.
 """
 import hashlib
+import json
 import re
 
 ARTICLE_HEADER = re.compile(
     r"^[ \t]*제[ \t]*\d+[ \t]*조(?:[ \t]*의[ \t]*\d+)?(?:[ \t]+\d+)?(?=[ \t]*(?:\(|$))", re.MULTILINE
 )
 CHAPTER_HEADER = re.compile(r"^[ \t]*제[ \t]*\d+[ \t]*[장절](?=[ \t]|$)[^\n]*", re.MULTILINE)
+# DOM 범위를 쓸 때는 관(款) 제목도 장·절처럼 다음 조항의 소속 표시로 쓴다(#60, SEQ 18 정관 '제 1 관 임 용').
+DOM_SECTION_HEADER = re.compile(r"^[ \t]*제[ \t]*\d+[ \t]*[장절관](?=[ \t]|$)[^\n]*", re.MULTILINE)
+DOM_KINDS = ("article", "addendum")
 ADDENDUM_HEADER = re.compile(r"^[ \t]*부[ \t]*칙(?:[ \t]*\(([^)\n]*)\))?[ \t]*$", re.MULTILINE)
 ATTACHMENT_HEADER = re.compile(r"^[ \t]*\[별표/서식 파일\][ \t]*$", re.MULTILINE)
 REFERENCE = re.compile(r"제[ \t]*(\d+)[ \t]*조(?:[ \t]*의[ \t]*(\d+))?")
@@ -107,6 +111,93 @@ def split_units(text: str) -> list[dict]:
     elif units:
         units[0]["start"] = 0  # 앞쪽 공백도 첫 단위에 포함해 범위를 끊김 없이 유지한다.
     return units
+
+
+def validate_dom_articles(text: str, articles) -> list[dict]:
+    """수집기 스냅샷의 DOM 조항 범위(#60)를 검사한다. 잘못되면 ChunkingError로 그 규정만 색인을 거부한다.
+
+    각 항목: id(사이트 조문 ID), kind(article|addendum), label(제3조의2·부칙(2016.2.3.공포) 등), heading,
+    start·end(text[start:end]가 그 조문), deleted. 범위는 겹치지 않고 순서대로이며, 범위는 heading으로 시작해야 한다.
+    """
+    if not isinstance(articles, list) or not articles:
+        raise ChunkingError("스냅샷 articles가 비어 있습니다.")
+    checked, seen, previous_end = [], set(), 0
+    for index, item in enumerate(articles):
+        if not isinstance(item, dict):
+            raise ChunkingError(f"articles[{index}]가 객체가 아닙니다.")
+        source_id, kind, label = str(item.get("id") or ""), item.get("kind"), _compact(str(item.get("label") or ""))
+        start, end = item.get("start"), item.get("end")
+        where = f"articles[{index}]({source_id or label or '?'})"
+        if not source_id or source_id in seen:
+            raise ChunkingError(f"{where}: 조문 ID가 없거나 중복입니다.")
+        if kind not in DOM_KINDS or not label:
+            raise ChunkingError(f"{where}: kind 또는 label이 올바르지 않습니다.")
+        if not (isinstance(start, int) and isinstance(end, int) and previous_end <= start < end <= len(text)):
+            raise ChunkingError(f"{where}: 범위가 본문 밖이거나 앞 조문과 겹칩니다.")
+        heading = _compact(str(item.get("heading") or ""))
+        if heading and not _compact(text[start:end]).startswith(heading):
+            raise ChunkingError(f"{where}: 범위가 조문 제목({item.get('heading')})으로 시작하지 않습니다.")
+        seen.add(source_id)
+        previous_end = end
+        checked.append({"id": source_id, "kind": kind, "label": label, "start": start, "end": end,
+                        "heading": str(item.get("heading") or "").strip(), "deleted": bool(item.get("deleted"))})
+    return checked
+
+
+def dom_units(text: str, articles) -> list[dict]:
+    """DOM 조항 범위로 단위를 만든다(#60). 정규식으로 조항 경계를 다시 찾지 않는다.
+
+    - 첫 조문 앞의 규정명·연혁은 preamble, 장·절·관 제목은 바로 다음 조문 단위의 앞부분에 둔다.
+    - 조문 사이에 남은 글(장·관 제목 등)도 다음 조문 단위에 붙여 원문을 빠짐없이 덮는다.
+    - 부칙 범위 안의 '제N조'는 부칙 라벨을 붙여 따로 나눈다(부칙(…)제2조). 본칙 조와 섞이지 않는다.
+    - 마지막 조문 뒤의 [별표/서식 파일]은 attachments 단위다.
+    - 단위마다 사이트 조문 ID(source_id)와 DOM 삭제 표시(dom_deleted)를 남긴다.
+    """
+    items = validate_dom_articles(text, articles)
+    units, cursor, chapter = [], 0, ""
+    for index, item in enumerate(items):
+        gap = text[cursor:item["start"]]
+        sections = list(DOM_SECTION_HEADER.finditer(gap))
+        if sections:
+            chapter = re.sub(r"\s+", " ", sections[-1].group(0)).strip()
+        unit_start = cursor
+        if index == 0:
+            lead = sections[0].start() if sections else len(gap)
+            if gap[:lead].strip():
+                units.append({"start": 0, "end": lead, "kind": "preamble", "article_id": "", "header": "",
+                              "chapter": "", "source_id": "", "dom_deleted": False})
+                unit_start = lead
+        if item["kind"] == "article":
+            units.append({"start": unit_start, "end": item["end"], "kind": "article", "article_id": item["label"],
+                          "header": _compact(item["heading"]) or item["label"], "chapter": chapter,
+                          "source_id": item["id"], "dom_deleted": item["deleted"]})
+        else:
+            body = text[item["start"]:item["end"]]
+            inner = [m for m in ARTICLE_HEADER.finditer(body) if m.start() > 0]
+            edges = [unit_start] + [item["start"] + m.start() for m in inner] + [item["end"]]
+            labels = [item["label"]] + [f"{item['label']}{_article_id(m.group(0))}" for m in inner]
+            for number, (start, end) in enumerate(zip(edges, edges[1:])):
+                units.append({"start": start, "end": end, "kind": "addendum", "article_id": labels[number],
+                              "header": labels[number], "chapter": chapter,
+                              "source_id": item["id"] if number == 0 else f"{item['id']}#{labels[number]}",
+                              "dom_deleted": item["deleted"]})
+        cursor = item["end"]
+    tail = text[cursor:]
+    attachment = ATTACHMENT_HEADER.search(tail)
+    attach_start = cursor + attachment.start() if attachment else len(text)
+    units[-1]["end"] = attach_start  # 마지막 조문 뒤 남은 글은 마지막 단위에 붙인다.
+    if attachment:
+        units.append({"start": attach_start, "end": len(text), "kind": "attachments", "article_id": "별표/서식",
+                      "header": "[별표/서식 파일]", "chapter": chapter, "source_id": "", "dom_deleted": False})
+    return [unit for unit in units if unit["end"] > unit["start"]]
+
+
+def dom_fingerprint(text: str, articles) -> str:
+    """본문과 DOM 조문 범위·ID·삭제 표시를 함께 담은 해시. 본문이 같아도 조문 구성이 바뀌면 다시 색인한다."""
+    items = validate_dom_articles(text, articles)
+    canonical = json.dumps([[i["id"], i["kind"], i["label"], i["start"], i["end"], i["deleted"]] for i in items],
+                           ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256((text + "\0" + canonical).encode("utf-8")).hexdigest()
 
 
 def _reference_target(window: str, own_title: str) -> str:
@@ -250,9 +341,13 @@ def chunk_regulation(regulation: dict, tokenizer, max_tokens: int = 128, overlap
         if not regulation.get(key):
             raise ChunkingError(f"공식 규정 입력에 {key}가 없습니다.")
     text = regulation["text"]
-    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    articles = regulation.get("articles")
+    if articles:  # 수집기 스냅샷: DOM 조항 범위를 그대로 쓴다(#60).
+        units, text_hash = dom_units(text, articles), dom_fingerprint(text, articles)
+    else:  # 조항 범위가 없는 입력(발췌본·이전 스냅샷): 줄 정규식으로 나눈다.
+        units, text_hash = split_units(text), hashlib.sha256(text.encode("utf-8")).hexdigest()
     chunks = []
-    for unit in split_units(text):
+    for unit in units:
         prefix = _prefix(regulation["title"], unit, tokenizer, max_tokens)
         for source_start, source_end in _windows(text, unit, prefix, tokenizer, max_tokens, overlap_tokens):
             content = text[source_start:source_end]
@@ -267,7 +362,8 @@ def chunk_regulation(regulation: dict, tokenizer, max_tokens: int = 128, overlap
                 "source_start": source_start, "source_end": source_end,
                 "content": content, "embedding_text": prefix + content,
                 "references": extract_references(content, unit["article_id"], regulation["title"]),
-                "deleted": _is_deleted(unit, text[unit["start"]:unit["end"]]),
+                "deleted": bool(unit.get("dom_deleted")) or _is_deleted(unit, text[unit["start"]:unit["end"]]),
+                "source_id": unit.get("source_id", ""),
             })
     return chunks
 
@@ -293,4 +389,17 @@ def verify_chunks(regulation: dict, chunks: list[dict], tokenizer, max_tokens: i
     missing = [i for i, char in enumerate(text) if not char.isspace() and not covered[i]]
     if missing:
         problems.append(f"원문 {len(missing)}자가 어떤 청크에도 포함되지 않았습니다 (첫 위치 {missing[0]}).")
+    if regulation.get("articles"):  # DOM 범위를 썼다면 모든 조문이 청크로 남고 범위를 넘지 않아야 한다.
+        items = validate_dom_articles(text, regulation["articles"])
+        by_source = {}
+        for chunk in chunks:
+            by_source.setdefault(chunk.get("source_id", ""), []).append(chunk)
+        for item in items:
+            own = by_source.get(item["id"], [])
+            if not own:
+                problems.append(f"DOM 조문 {item['id']}({item['label']})의 청크가 없습니다.")
+            elif any(c["source_end"] > item["end"] for c in own):
+                problems.append(f"DOM 조문 {item['id']}({item['label']})의 청크가 범위를 넘었습니다.")
+            elif item["deleted"] and not all(c["deleted"] for c in own):
+                problems.append(f"DOM에서 삭제된 조문 {item['id']}({item['label']})이 검색 대상으로 남았습니다.")
     return problems

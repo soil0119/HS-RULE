@@ -29,6 +29,16 @@
 - 러너가 `DROP TABLE/COLUMN`, `TRUNCATE`, `DELETE FROM`을 발견하면 적용을 거부한다. 색인을 비우는 일은 `python -m hsrule.official_repository --rebuild`로만 한다.
 - `initialize()`는 여러 번 실행해도 안전하고, 적용할 것이 없으면 빈 목록을 반환한다.
 
+## 수집기 DOM 조문 범위 (#60)
+
+수집 스냅샷 항목에 `articles`(사이트 조문 ID·kind·label·heading·start·end·deleted, PR #47 형식)가 있으면 청커는 정규식으로 조항을 다시 나누지 않고 그 범위를 쓴다. 없으면(학칙 발췌본, 이전 형식) 기존 줄 정규식으로 나눈다.
+
+- 범위는 겹치지 않고 순서대로이며 `text[start:end]`가 heading으로 시작해야 한다. 어긋나면 그 규정만 색인을 거부한다(`failed`에 기록, 다른 규정은 계속).
+- 첫 조문 앞(규정명·연혁)은 `preamble`, 조문 사이의 장·절·관 제목은 다음 조문 청크 앞부분, 마지막 뒤의 `[별표/서식 파일]`은 `attachments`다. 원문 전체가 빠짐없이 청크에 들어가는지 `verify_chunks`가 확인한다.
+- 부칙 범위 안의 `제N조`는 `부칙(…)제N조`로 따로 나눈다. DOM이 삭제로 표시한 조문(범위형 삭제 포함)은 검색에서 제외한다.
+- `hs_reg_chunks.source_article_id`(0004)에 사이트 조문 ID를 저장한다. 부칙 안 조는 `<부칙 ID>#<라벨>`이다. 청크 ID(`개정:순번`)는 개정마다 새로 매기므로, 개정이 바뀌어도 같은 조문을 잇는 키는 `(regulation_id, source_article_id)`다. 연혁 줄이 앞에 추가돼도 조문 라벨·조문 ID·내용은 같다.
+- 본문이 같아도 조문 ID·범위·삭제 표시가 바뀌면 변경으로 보고 다시 색인한다(`text_hash`에 DOM 구성을 포함).
+
 ## 로컬 개발 환경 (DB만)
 
 앱은 Docker로 만들지 않는다. PostgreSQL+pgvector만 띄운다.
