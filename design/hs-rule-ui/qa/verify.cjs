@@ -8,7 +8,7 @@ const trees = JSON.parse(require('node:child_process').execFileSync('python3', [
 let checks = 0;
 function ok(value, message) { assert.ok(value, message); checks++; }
 class Elem {
-  constructor(tag, attrs = {}, children = []) { this.tagName=tag.toUpperCase(); this.attrs={...attrs}; this.children=[]; this.listeners={}; this.value=''; this.disabled='disabled' in attrs; this.hidden='hidden' in attrs; this.open=false; this.files=[]; children.forEach(child=>this.append(child)); }
+  constructor(tag, attrs = {}, children = []) { this.tagName=tag.toUpperCase(); this.attrs={...attrs}; this.children=[]; this.listeners={}; this.value=this.tagName==='INPUT'?(attrs.value??''):''; this.disabled='disabled' in attrs; this.hidden='hidden' in attrs; this.open=false; this.files=[]; children.forEach(child=>this.append(child)); }
   get className(){ return this.attrs.class || ''; } set className(value){ this.attrs.class=value; }
   get classList(){ const self=this; return { contains(value){ return self.className.split(' ').includes(value); }, add(value){ if(!this.contains(value)) self.className+=' '+value; }, remove(value){self.className=self.className.split(' ').filter(x=>x!==value).join(' ');},toggle(value,force){let on=force??!this.contains(value);on?this.add(value):this.remove(value);return on;} }; }
   get dataset(){ const self=this; return new Proxy({}, {get:(_,key)=>self.attrs['data-'+key.replace(/[A-Z]/g,x=>'-'+x.toLowerCase())],set:(_,key,value)=>{self.attrs['data-'+key.replace(/[A-Z]/g,x=>'-'+x.toLowerCase())]=String(value);return true;}}); }
@@ -33,7 +33,7 @@ class TextNode extends Elem {constructor(value){super('#text');this.value=value;
 function build(tree){if(typeof tree==='string')return new TextNode(tree);const e=new Elem(tree.tag,tree.attrs,tree.children.map(build));if(tree.tag==='option')e.value=tree.attrs.value??e.textContent;if(tree.tag==='select'){const options=e.querySelectorAll('option');e.value=(options.find(x=>'selected' in x.attrs)||options[0])?.value||'';}return e;}
 function assignDocument(element,document){element.ownerDocument=document;element.children.forEach(child=>assignDocument(child,document));}
 function environment(filename='index.html',width=1440,entries={},options={}) {
-  const document=build(trees[filename]);document.body=document.querySelector('body');document.documentElement=document.querySelector('html');document.fonts={load:async()=>[{family:'SUIT Variable'}],check:()=>true};document.createElement=tag=>{let e=new Elem(tag);e.ownerDocument=document;return e;};document.createElementNS=(_,tag)=>document.createElement(tag);document.createTextNode=value=>{let e=new TextNode(value);e.ownerDocument=document;return e;};assignDocument(document,document);
+  const document=build(trees[filename]);document.body=document.querySelector('body');document.documentElement=document.querySelector('html');document.getElementById=id=>document.querySelector('#'+id);document.fonts={load:async()=>[{family:'SUIT Variable'}],check:()=>true};document.createElement=tag=>{let e=new Elem(tag);e.ownerDocument=document;return e;};document.createElementNS=(_,tag)=>document.createElement(tag);document.createTextNode=value=>{let e=new TextNode(value);e.ownerDocument=document;return e;};assignDocument(document,document);
   const memory=new Map(Object.entries(entries)), fetchCalls=[],responses=[],xhrCalls=[],xhrResponses=[],opened=[],timers=new Map();let timerId=0;
   class XHR {constructor(){this.upload={};this.headers={};}open(method,path){this.method=method;this.path=path;}setRequestHeader(key,value){this.headers[key]=value;}getResponseHeader(){return this.contentType||'application/json';}send(body){xhrCalls.push({method:this.method,path:this.path,headers:this.headers,body});queueMicrotask(()=>{const response=xhrResponses.shift()||{status:200,data:{success:true,document:{id:'a'.repeat(32),status:'stored'}}};if(response.defer){response.defer(this);return;}this.status=response.status;this.contentType=response.type;this.responseText=JSON.stringify(response.data);this.upload.onprogress?.({lengthComputable:true,loaded:1,total:2});this.upload.onprogress?.({lengthComputable:true,loaded:2,total:2});this.onload();});}}
   const listeners={};const location={pathname:'/'+filename,protocol:'https:',origin:'https://hs-rule.test',href:'https://hs-rule.test/'+filename,hash:'',search:''};
@@ -102,12 +102,39 @@ async function checkFooterNavigation() {
   ok(admin.$('[data-admin-entry]').href==='upload.html','signed-in administrator entry leads to the existing protected tools');
   ok(admin.$('[data-admin-entry]').textContent==='관리자 도구','administrator entry identifies the tools clearly');
 }
+async function checkRagSettings() {
+  const locked=environment('upload.html');locked.boot();
+  ok(locked.$('#rag-settings').hidden&&locked.$('#rag-settings-controls').disabled&&locked.$('#save-rag-settings').disabled&&locked.fetchCalls.length===0,'RAG settings stay hidden and locked without an administrator session');
+  const view=environment('upload.html',390,{hsu_token:'test-only-session'});let verifySession;
+  view.responses.push(()=>new Promise(resolve=>verifySession=resolve));view.boot();await flush();
+  ok(view.$('#rag-settings').hidden&&view.$('#rag-settings-controls').disabled&&view.$('#save-rag-settings').disabled,'a stored token does not reveal RAG settings before server verification');
+  verifySession(json({rules:[]}));await flush();
+  ok(!view.$('#rag-settings').hidden&&!view.$('#rag-settings-controls').disabled&&view.$('#save-rag-settings').disabled,'verified administrators can adjust RAG settings while saving remains disabled');
+  ok(view.$('#rag-settings-status').textContent.includes('저장 API 연동 대기'),'RAG settings explain that the save API is not connected');
+  const controls=[['rag-retrieval-k','6','9'],['rag-min-cosine','0.25','0.50'],['rag-temperature','0.0','0.8']];
+  for(const [id,initial,changed] of controls) {
+    ok(view.$('#'+id).value===initial&&view.$('#'+id+'-value').textContent===initial&&view.$('#'+id+'-modified').hidden,'RAG default value and unchanged indicator: '+id);
+    view.$('#'+id).value=changed;await view.$('#'+id).emit('input');
+    ok(view.$('#'+id+'-value').textContent===changed&&!view.$('#'+id+'-modified').hidden&&view.$('#save-rag-settings').disabled,'RAG input updates its displayed value and modified indicator: '+id);
+  }
+  for(const [value,event,want] of [['-1','change','0.0'],['3','blur','2.0'],['0.26','change','0.3']]) {
+    view.$('#rag-temperature').value=value;await view.$('#rag-temperature').emit(event);
+    ok(view.$('#rag-temperature').value===want&&view.$('#rag-temperature-value').textContent===want&&view.$('#rag-temperature-modified').hidden===(want==='0.0')&&view.$('#save-rag-settings').disabled,'temperature normalizes its bounds and precision on '+event+': '+value);
+  }
+  await view.$('#reset-rag-settings').click();
+  for(const [id,initial] of controls)ok(view.$('#'+id).value===initial&&view.$('#'+id+'-value').textContent===initial&&view.$('#'+id+'-modified').hidden,'reset restores the RAG default and clears its modified indicator: '+id);
+  ok(view.$('#save-rag-settings').disabled&&view.fetchCalls.length===1&&view.fetchCalls[0].path==='/uploaded-rules','adjusting and resetting RAG settings never sends settings API requests');
+  view.responses.push(json({code:'session_expired'},401));await view.$('#refresh-uploaded').click();
+  ok(!view.memory.has('hsu_token')&&view.$('#rag-settings').hidden&&view.$('#rag-settings-controls').disabled&&view.$('#save-rag-settings').disabled,'session expiry hides and locks RAG settings again');
+}
 (async()=>{
+  if(process.argv.includes('--rag-settings-only')){await checkRagSettings();console.log(`RAG settings: ${checks} assertions passed.`);return;}
   if(process.argv.includes('--navigation-only')){await checkFooterNavigation();console.log('Footer navigation: PASS');return;}
   await checkFooterNavigation();
   if(process.argv.includes('--animation-only')){await checkAnimatedExamples();console.log('Animated examples: PASS');return;}
   await checkLanguageSwitch();await checkAnimatedExamples();
   if(process.argv.includes('--feedback-only')){console.log('Language switch and animated examples: PASS');return;}
+  await checkRagSettings();
   const e=environment(),api=e.context.HSRuleAPI;
   e.responses.push(json(answer()));const history=Array.from({length:16},(_,i)=>({role:i%2?'assistant':'user',content:'prior '+i}));history.push({role:'system',content:'must be excluded'});await api.query('  질문  ',history,'en');let call=e.fetchCalls.at(-1),body=JSON.parse(call.body);ok(body.question==='질문'&&body.language==='en'&&body.messages.length===12,'query language and max 12 prior messages');ok(body.messages.every(m=>['user','assistant'].includes(m.role))&&!call.headers.Authorization,'history roles and public query');
   await assert.rejects(api.query('a'.repeat(2001)),err=>err.code==='question_too_long');checks++;await assert.rejects(api.query(' '),err=>err.code==='question_required');checks++;
