@@ -166,12 +166,102 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(ask_rag.load_regulations(None)[0]["regulation_id"], "20")
 
 
+class GroqStatusError(Exception):
+    """groq.APIStatusError처럼 status_code와 body를 가진 대역."""
+
+    def __init__(self, status, code):
+        super().__init__("본문에 조직 ID 같은 값이 있을 수 있음 org_secret")
+        self.status_code, self.body = status, {"error": {"code": code, "type": "tokens"}}
+
+
+class DemoFindingsTests(unittest.TestCase):
+    """#76 실제 시연(Groq)에서 드러난 문제의 회귀."""
+
+    def test_clarifying_answer_keeps_its_evidence(self):
+        model = llm(json.dumps({"found": False, "answer": "2016학년도 이후 입학생은 130학점(제34조), 이전은 140학점입니다.",
+                                "citations": ["S1", "S2"], "followups": [], "needs_clarification": True,
+                                "clarifying_questions": ["몇 학년도에 입학하셨나요?"],
+                                "missing_conditions": ["admission_year"]}, ensure_ascii=False))
+        result = CitedAnswerer(model, StubSearcher([CREDIT_MAIN, CREDIT_ADDENDUM])).answer("졸업학점은?")
+        self.assertTrue(result["found"])
+        self.assertEqual([s["article_id"] for s in result["sources"]], ["제34조", "부칙(2016.2.3공포)제2조"])
+        self.assertTrue(result["clarification"]["needed"])
+        self.assertTrue(result["grounding"]["verified"])
+        self.assertIn("found는 true", model.seen[0][0].content)
+
+    def test_groq_413_tpm_is_a_rate_limit_and_detail_hides_the_message(self):
+        from hsrule.chains import provider_detail
+
+        error = GroqStatusError(413, "rate_limit_exceeded")
+        self.assertTrue(is_rate_limited(error))
+        self.assertFalse(is_rate_limited(GroqStatusError(413, "request_too_large")))
+        self.assertEqual(provider_detail(error), "HTTP 413, rate_limit_exceeded")
+        self.assertNotIn("org_secret", provider_detail(error))
+
+    def test_session_prints_provider_status(self):
+        clock = FakeClock()
+        answerer = CitedAnswerer(scripted(clock, ("raise", GroqStatusError(400, "invalid_request_error"), 0)),
+                                 StubSearcher([CREDIT_MAIN]))
+        answerer.chain.clock = clock
+        out = io.StringIO()
+        ask_rag.run_session(answerer, ["졸업학점은?"], out)
+        self.assertIn("오류(provider, HTTP 400, invalid_request_error)", out.getvalue())
+        self.assertNotIn("org_secret", out.getvalue())
+
+    def test_db_hints(self):
+        url = "postgresql://postgres:x@127.0.0.1:5432/hansungrules"
+        self.assertIn("URL 인코딩", ask_rag.db_hint("postgresql://postgres:a/b@127.0.0.1/x",
+                                                    Exception('could not translate host name "postgres"')))
+        self.assertIn("docker compose", ask_rag.db_hint(url, Exception("Connection refused")))
+        self.assertIn("비밀번호", ask_rag.db_hint(url, Exception('password authentication failed for user "postgres"')))
+
+
 URL = os.getenv("HSRULE_TEST_DATABASE_URL")
 
 
 @unittest.skipUnless(URL, "set HSRULE_TEST_DATABASE_URL to a disposable PostgreSQL with pgvector")
 class EndToEndTests(unittest.TestCase):
     """실제 DB 색인·검색을 거쳐 main()이 동작하는지 본다(임베딩·모델만 대역)."""
+
+    def test_mismatched_index_explains_rebuild_and_rebuild_fixes_it(self):
+        from pathlib import Path
+
+        from hsrule.official_repository import OfficialRepository
+        from tests.fakes import FakeEmbeddings
+
+        corpus = (Path(ask_rag.ROOT) / "tests/fixtures/hansung_rules_excerpt.txt").read_text(encoding="utf-8")
+        repository = OfficialRepository(URL)
+        repository.initialize()
+        repository.rebuild()
+        other = FakeEmbeddings(corpus)
+        other.model_name = "another-model"
+        from hsrule.official_indexer import index_regulation
+        index_regulation(dict(ask_rag.DEFAULT_REGULATION, regulation_id="99", revision_id="99:1", text=corpus),
+                         repository, other)
+        env = {"DATABASE_URL": URL, "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}
+        patches = (mock.patch.dict(os.environ, env),
+                   mock.patch("hsrule.embeddings.LocalEmbeddings", lambda: FakeEmbeddings(corpus)),
+                   mock.patch("hsrule.official_indexer.validate_embeddings", lambda e: {"model": "fake"}),
+                   mock.patch("hsrule.rag_config.create_llm", lambda settings: llm(reply("130학점(제34조).", ["S1"]))))
+        with patches[0], patches[1], patches[2], patches[3], mock.patch("sys.stderr", new=io.StringIO()) as err, \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(ask_rag.main(["--index", "--no-ping", "--env-file", "/nonexistent", "-q", "x"]), 5)
+        self.assertIn("--rebuild", err.getvalue())
+        with patches[0], patches[1], patches[2], patches[3], mock.patch("sys.stdout", new=io.StringIO()) as out:
+            self.assertEqual(ask_rag.main(["--rebuild", "--no-ping", "--env-file", "/nonexistent", "-q", "졸업학점"]), 0)
+        self.assertIn("RAG 색인을 비웠습니다", out.getvalue())
+        self.assertIn("색인 20 한성대학교 학칙: indexed", out.getvalue())
+
+    def test_unreachable_db_gets_a_hint(self):
+        env = {"DATABASE_URL": "postgresql://postgres:x@127.0.0.1:1/none", "LLM_PROVIDER": "gemini",
+               "GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}
+        from tests.fakes import FakeEmbeddings
+
+        with mock.patch.dict(os.environ, env), mock.patch("hsrule.embeddings.LocalEmbeddings", lambda: FakeEmbeddings("x")), \
+                mock.patch("hsrule.rag_config.create_llm", lambda settings: llm("OK")), \
+                mock.patch("sys.stderr", new=io.StringIO()) as err, mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual(ask_rag.main(["--no-ping", "--env-file", "/nonexistent", "-q", "x"]), 4)
+        self.assertIn("DB에 연결하지 못했습니다", err.getvalue())
 
     def test_index_and_ask_once(self):
         from pathlib import Path

@@ -98,9 +98,12 @@ def run_session(answerer, questions, out, *, language="ko", include_private=Fals
         try:
             result = answerer.answer(question, list(history), include_private=include_private, language=language)
         except RagError as exc:
+            from hsrule.chains import provider_detail
+
             seconds = time.perf_counter() - started
-            print(f"오류({exc.reason}): {REASONS.get(exc.reason, str(exc))}", file=out)
-            record.update(error={"code": exc.code, "reason": exc.reason}, seconds=round(seconds, 3))
+            detail = provider_detail(exc.__cause__) if exc.__cause__ is not None else ""
+            print(f"오류({exc.reason}{f', {detail}' if detail else ''}): {REASONS.get(exc.reason, str(exc))}", file=out)
+            record.update(error={"code": exc.code, "reason": exc.reason, "detail": detail}, seconds=round(seconds, 3))
         except ValueError as exc:
             print(f"입력 오류: {exc}", file=out)
             continue
@@ -154,6 +157,37 @@ def ping(llm) -> tuple[bool, str]:
         return False, f"모델 호출 실패({type(exc).__name__}{f', HTTP {status}' if status else ''})."
 
 
+def db_hint(url: str, exc) -> str:
+    """연결 실패 원인 안내. 비밀번호는 출력하지 않는다."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        host = ""
+    text = str(exc).lower()
+    if host == "postgres" or "translate host name" in text:
+        return ("주소의 호스트가 잘못 읽혔습니다. 로컬 Docker DB는 127.0.0.1이고, 비밀번호에 @ / : # 같은 문자가 있으면 "
+                "DATABASE_URL에서 URL 인코딩해야 합니다(docs/rag-local-demo.md).")
+    if "password authentication failed" in text:
+        return "비밀번호가 맞지 않습니다. .env의 POSTGRES_PASSWORD와 DATABASE_URL의 비밀번호를 확인하세요."
+    if "connection refused" in text or "could not connect" in text:
+        return "DB가 꺼져 있습니다. docker compose up -d --wait db 로 켜세요."
+    if "does not exist" in text:
+        return "DB 이름이 없습니다. DATABASE_URL 끝의 DB 이름(hansungrules)을 확인하세요."
+    return f"({type(exc).__name__}) DATABASE_URL과 DB 상태를 확인하세요."
+
+
+def _quiet_tokenizer_warnings() -> None:
+    """긴 본문 길이를 셀 때 나오는 토크나이저 경고를 끈다. 청크 길이는 verify_chunks가 따로 검사한다."""
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except ImportError:
+        pass
+
+
 def _commit() -> str | None:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True,
@@ -174,6 +208,8 @@ def main(argv=None) -> int:
     parser.add_argument("--ping", action="store_true", help="키·모델 연결만 확인하고 끝낸다")
     parser.add_argument("--no-ping", action="store_true", help="시작할 때 연결 확인 호출을 하지 않는다")
     parser.add_argument("--env-file", default=str(ROOT / ".env"), help="읽을 .env 파일(기본: 저장소 최상위)")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="RAG 색인(hs_reg_*)을 비우고 다시 색인한다. 웹 문서 테이블은 건드리지 않는다")
     args = parser.parse_args(argv)
 
     from hsrule.rag_config import RagConfigError, RagSettings, create_llm
@@ -205,15 +241,32 @@ def main(argv=None) -> int:
     from hsrule.official_repository import OfficialRepository
     from hsrule.official_retrieval import HybridRetriever
 
+    import psycopg2
+
+    from hsrule.official_repository import IndexConsistencyError
+
+    _quiet_tokenizer_warnings()
     embeddings = LocalEmbeddings()
-    if args.check_embeddings or args.index:
+    if args.check_embeddings or args.index or args.rebuild:
         print("임베딩 사전검증:", json.dumps(validate_embeddings(embeddings), ensure_ascii=False))
     repository = OfficialRepository(url)
-    repository.initialize()
+    try:
+        repository.initialize()
+    except psycopg2.OperationalError as exc:
+        print("DB에 연결하지 못했습니다. " + db_hint(url, exc), file=sys.stderr)
+        return 4
     corpus = "스냅샷 " + args.snapshot if args.snapshot else "학칙 발췌본(표본, 실제 전체 규정 아님)"
-    if args.index:
+    if args.rebuild:
+        repository.rebuild()
+        print("RAG 색인을 비웠습니다(hs_reg_*). 다시 색인합니다.")
+    if args.index or args.rebuild:
         for regulation in load_regulations(args.snapshot):
-            result = index_regulation(regulation, repository, embeddings)
+            try:
+                result = index_regulation(regulation, repository, embeddings)
+            except IndexConsistencyError as exc:
+                print(f"색인 설정 불일치: {exc}\n이 DB에 다른 모델·설정으로 만든 색인이 있습니다. "
+                      "일회용 DB라면 --rebuild로 다시 만드세요.", file=sys.stderr)
+                return 5
             print(f"색인 {regulation.get('regulation_id')} {regulation.get('title', '')}: {result['status']}")
     answerer = CitedAnswerer(llm, HybridRetriever(repository, embeddings, k=settings.retrieval_k),
                              k=settings.retrieval_k)

@@ -27,7 +27,8 @@ JSON_INSTRUCTION = (
     "- needs_clarification: [근거]의 규정이 입학년도·과정(학부/대학원/학석사연계)·학적 상태·소속 학과·적용 시점에 "
     "따라 달라지는데 질문과 대화 이력, [사용자가 밝힌 조건]에 그 조건이 없을 때만 true. 이때 answer에는 근거로 "
     "확인되는 조건별 규정을 짧게 설명하고, clarifying_questions(최대 2개)로 판단에 필요한 조건만 묻는다. "
-    "이름·연락처·학번 전체 같은 개인정보는 묻지 않는다. 이미 밝힌 조건은 다시 묻지 않는다.\n"
+    "이름·연락처·학번 전체 같은 개인정보는 묻지 않는다. 이미 밝힌 조건은 다시 묻지 않는다. "
+    "조건별 규정을 [근거]로 설명했다면 needs_clarification이 true여도 found는 true이고 citations에 그 라벨을 넣는다.\n"
     "- missing_conditions: admission_year, program, student_status, department, effective_date 중 빠진 조건."
 )
 REPAIR_INSTRUCTION = {
@@ -139,6 +140,9 @@ class CitedAnswerer:
         state["provided_conditions"] = provided
         parsed, messages_used = self._ask(state)
         kept, dropped = validate(parsed, docs, include_private=include_private)
+        if not parsed.found and parsed.needs_clarification and kept:
+            # 조건을 되물으면서 근거로 조건별 규정을 설명한 답은 근거가 있는 답이다(#76 시연에서 확인).
+            parsed = parsed.model_copy(update={"found": True})
         by_label = {doc.metadata["label"]: doc for doc in docs}
         grounding = {"checked": 0, "unsupported": [], "verified": True, "repaired": False}
         if parsed.found:

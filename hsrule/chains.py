@@ -225,9 +225,39 @@ def _status_code(exc) -> int | None:
     return None
 
 
+def _error_code(exc) -> str:
+    """provider 오류 본문의 코드·종류(예: rate_limit_exceeded). 메시지 본문은 읽지 않는다."""
+    for item in _error_chain(exc):
+        body = getattr(item, "body", None)
+        if not isinstance(body, dict):
+            body = getattr(item, "details", None) if isinstance(getattr(item, "details", None), dict) else None
+        if isinstance(body, dict):
+            error = body.get("error", body)
+            if isinstance(error, dict):
+                for key in ("code", "type", "status"):
+                    value = error.get(key)
+                    if isinstance(value, str) and value:
+                        return value[:60]
+        status = getattr(item, "status", None)
+        if isinstance(status, str) and status:
+            return status[:60]
+    return ""
+
+
+def provider_detail(exc) -> str:
+    """사용자에게 보여 줄 provider 오류 요약: HTTP 상태와 오류 코드. 키·원문이 섞일 수 있는 메시지는 쓰지 않는다."""
+    status, code = _status_code(exc), _error_code(exc)
+    parts = [f"HTTP {status}" if status else "", code]
+    return ", ".join(part for part in parts if part) or type(exc).__name__
+
+
 def is_rate_limited(exc) -> bool:
-    """무료 한도 초과(429)인지 본다. 키·모델 설정 오류나 일반 provider 오류와 구분해 알린다(#76)."""
-    if _status_code(exc) == 429:
+    """무료 한도 초과인지 본다. 키·모델 설정 오류나 일반 provider 오류와 구분해 알린다(#76).
+
+    429 외에, 한 요청이 분당 토큰 한도를 넘으면 Groq처럼 413과 rate_limit_exceeded로 답하는 provider도 있다.
+    """
+    status = _status_code(exc)
+    if status == 429 or (status == 413 and "rate_limit" in _error_code(exc)):
         return True
     return any(name in type(item).__name__.lower() for item in _error_chain(exc)
                for name in ("ratelimit", "resourceexhausted"))

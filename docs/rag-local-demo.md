@@ -35,6 +35,10 @@ python scripts/ask_rag.py --language en -q "What does Article 34 say?"
 
 - 첫 실행은 임베딩 모델(`paraphrase-multilingual-MiniLM-L12-v2`)을 내려받는다. `--index`나 `--check-embeddings`를 주면 입력 길이·384차원·한국어 구분 사전검증 결과를 먼저 출력하고, 통과하지 못하면 멈춘다.
 - `--snapshot`이 없으면 학칙 발췌본(표본)만 색인하며 출력에 그렇게 표시한다. 수집 스냅샷(#17)이 생기면 `--snapshot 파일`로 바꾼다. 다시 실행해도 바뀐 규정만 다시 임베딩한다.
+- DB 비밀번호에 `@ / : #` 같은 문자가 있으면 `DATABASE_URL`에 그대로 넣을 수 없다. 아래처럼 인코딩해서 넣는다.
+  `python -c "import dotenv,urllib.parse as u;v=dotenv.dotenv_values('.env');open('.env','a',encoding='utf-8').write('\nDATABASE_URL=postgresql://postgres:%s@127.0.0.1:5432/hansungrules\n'%u.quote(v['POSTGRES_PASSWORD'],safe=''))"`
+- 같은 DB로 테스트를 돌린 적이 있으면 대역 임베딩 색인이 남아 `색인 설정 불일치`가 난다. 일회용 DB라면 `--rebuild`로 RAG 색인(`hs_reg_*`)만 비우고 다시 만든다.
+- provider 오류는 `오류(provider, HTTP 상태, 코드)`로 나온다. Groq 무료 한도는 분당 토큰도 있어서, 짧은 시간에 질문이 몰리면 `rate_limit`이 날 수 있다. 1분 뒤 다시 질문한다.
 - 대화 명령: `/new` 새 대화, `/en`·`/ko` 답변 언어, `/private` 비공개 규정 포함 전환, `/quit` 종료.
 - 시작할 때 작은 호출 1회로 키·모델을 확인하고, 실패하면 DB·임베딩을 건드리기 전에 원인(401·403 키, 404 모델, 429 한도, 시간 초과)을 알려 준다. `--no-ping`으로 끌 수 있다.
 - 오류는 원인별로 나온다: `timeout`(시간 초과), `rate_limit`(무료 한도 초과 429), `provider`(키·모델 ID·네트워크), `json`(형식). 키·모델 설정 누락은 시작할 때 바로 알린다.
