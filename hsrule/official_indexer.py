@@ -125,12 +125,40 @@ def index_regulation(regulation: dict, repository, embeddings, *, max_tokens: in
     return {"status": "indexed", "revision_id": regulation["revision_id"], "chunks": len(chunks)}
 
 
+SNAPSHOT_SCHEMA_VERSION = 1
+MAX_REMOVAL_RATIO = 0.2  # 완전한 스냅샷이라도 한 번에 지울 수 있는 규정 비율(대량 삭제 방지)
+MIN_REMOVAL_ALLOWANCE = 3
+
+
+class SnapshotError(ValueError):
+    """스냅샷 파일 형식이 계약(#68)과 다르다."""
+
+
+def read_snapshot(payload: dict) -> tuple[list[dict], bool]:
+    """스냅샷 파일 내용에서 (규정 목록, 완전 여부)를 꺼낸다(#68).
+
+    완전(complete)은 수집기가 목록 전체를 실패 없이 받았다고 밝힌 경우뿐이다:
+    {"schema_version": 1, "complete": true, "failures": [], "regulations": [...]}.
+    schema_version이 없는 이전 형식은 부분 결과로 보고 누락 규정을 지우지 않는다.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("regulations"), list):
+        raise SnapshotError("스냅샷에 regulations 목록이 없습니다.")
+    version = payload.get("schema_version")
+    if version is not None and version != SNAPSHOT_SCHEMA_VERSION:
+        raise SnapshotError(f"지원하지 않는 스냅샷 schema_version: {version!r}")
+    complete = version is not None and payload.get("complete") is True and not payload.get("failures")
+    return payload["regulations"], complete
+
+
 def sync_snapshot(regulations: list[dict], repository, embeddings, *, keep_previous: int = 1,
-                  preflight: bool = True, record_run: bool = True, **options) -> dict:
-    """검증된 전체 스냅샷과 색인을 맞춘다.
+                  preflight: bool = True, record_run: bool = True, complete: bool = False,
+                  max_removal_ratio: float = MAX_REMOVAL_RATIO, **options) -> dict:
+    """검증된 스냅샷과 색인을 맞춘다.
 
     - 스냅샷의 각 규정을 색인한다. 한 규정이 실패해도 나머지는 계속하고 실패를 보고한다.
-    - 스냅샷에 없는 규정은 색인에서 지운다. 단, 스냅샷이 비었거나 실패가 있으면 아무것도 지우지 않는다.
+    - 스냅샷에 없는 규정은 complete=True(수집기가 목록 전체를 실패 없이 받았다고 밝힌 경우)일 때만 지운다(#68).
+      부분 수집·재시작 중 결과로 누락 규정을 지우지 않는다. 색인 실패가 있거나, 지울 규정이 현재 색인의
+      max_removal_ratio(최소 3건)를 넘으면 지우지 않고 removal_skipped에 사유와 후보를 남긴다.
     - 규정마다 현재 개정과 이전 keep_previous개 개정만 보관한다.
     - 실행 기록을 DB에 남긴다. 중단되면 finished_at이 비어 있어 재개가 필요함을 알 수 있다.
     - 정리(prune)·누락 규정 삭제 같은 내부 오류로 실행이 끝까지 가지 못하면 성공으로 기록하지 않는다(#56).
@@ -159,11 +187,16 @@ def sync_snapshot(regulations: list[dict], repository, embeddings, *, keep_previ
             report[result["status"]].append(result["revision_id"])
             if result["status"] != "abolished":
                 report["pruned"] += repository.prune_revisions(regulation["regulation_id"], keep_previous)
-        if regulations and not report["failed"]:
-            for regulation_id in repository.regulation_ids():
-                if regulation_id not in seen:
-                    repository.delete_regulation(regulation_id)
-                    report["removed"].append(regulation_id)
+        missing = [rid for rid in repository.regulation_ids() if rid not in seen] if regulations else []
+        allowance = max(MIN_REMOVAL_ALLOWANCE, int(len(repository.regulation_ids()) * max_removal_ratio))
+        skip = ("partial_snapshot" if not complete else "index_failures" if report["failed"]
+                else "too_many_removals" if len(missing) > allowance else None)
+        if missing and skip:
+            report["removal_skipped"] = {"reason": skip, "candidates": missing}
+        elif missing:
+            for regulation_id in missing:
+                repository.delete_regulation(regulation_id)
+                report["removed"].append(regulation_id)
         completed = True
     except BaseException as exc:
         report["aborted"] = {"error_type": type(exc).__name__, "message": str(exc)[:200]}
@@ -190,10 +223,14 @@ def main(argv: list[str]) -> int:
         print("사용법: DATABASE_URL=... python -m hsrule.official_indexer <snapshot.json>", file=sys.stderr)
         return 2
     with open(argv[1], encoding="utf-8") as handle:
-        regulations = json.load(handle)["regulations"]
+        try:
+            regulations, complete = read_snapshot(json.load(handle))
+        except SnapshotError as exc:
+            print(f"스냅샷 오류: {exc}", file=sys.stderr)
+            return 2
     repository = OfficialRepository(os.environ["DATABASE_URL"])
     repository.initialize()
-    report = sync_snapshot(regulations, repository, LocalEmbeddings())
+    report = sync_snapshot(regulations, repository, LocalEmbeddings(), complete=complete)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 1 if report["failed"] else 0
 

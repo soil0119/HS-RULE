@@ -141,7 +141,8 @@ class IndexerTests(unittest.TestCase):
 
     def test_snapshot_sync_removes_missing_and_prunes_old(self):
         sync_snapshot([reg("20", "20:1"), reg("30", "30:1")], self.repo, self.emb)
-        report = sync_snapshot([reg("20", "20:2", TEXT + "\n제 68 조 (신규)\n신규.\n")], self.repo, self.emb)
+        report = sync_snapshot([reg("20", "20:2", TEXT + "\n제 68 조 (신규)\n신규.\n")], self.repo, self.emb,
+                               complete=True)
         self.assertEqual(report["removed"], ["30"])
         self.assertEqual(report["indexed"], ["20:2"])
         self.assertEqual(self.repo.regulation_ids(), ["20"])
@@ -152,7 +153,7 @@ class IndexerTests(unittest.TestCase):
         sync_snapshot([reg("20", "20:1"), reg("30", "30:1")], self.repo, self.emb)
         self.assertEqual(sync_snapshot([], self.repo, self.emb)["removed"], [])
         bad = dict(reg("20", "20:2"), official_url="")
-        report = sync_snapshot([bad], self.repo, self.emb)
+        report = sync_snapshot([bad], self.repo, self.emb, complete=True)
         self.assertEqual(len(report["failed"]), 1)
         self.assertEqual(report["removed"], [])
         self.assertEqual(self.repo.regulation_ids(), ["20", "30"])
