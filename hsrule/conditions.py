@@ -2,7 +2,7 @@
 
 - 질문·대화 이력에서 사용자가 이미 밝힌 조건(입학년도·과정·학적 상태·학과·적용 시점)을 찾는다.
   모델에게 알려 주어 다시 묻지 않게 하고, 모델이 요청한 추가 질문을 정리한다.
-- 답변의 수치가 인용한 근거(또는 사용자가 말한 값)에 있는지 확인한다.
+- 답변의 수치가 인용한 근거에 있는지 확인한다. 사용자가 밝힌 입학년도·적용 연도만 예외로 허용한다.
 
 모두 규칙 기반 점검이다. 문장 의미 전체를 검증하지 않으며, 한글 수사(예: '일곱 학기')는 검사하지 않는다.
 """
@@ -38,7 +38,7 @@ ADMISSION_PATTERNS = (
 )
 PROGRAM_PATTERNS = (
     ("학석사연계", re.compile(r"학\s*[·ㆍ.]?\s*석사\s*연계|bachelor'?s?[-\s]*master'?s?|combined\s+degree", re.I)),
-    ("대학원", re.compile(r"대학원생?|석사과정|박사과정|graduate\s+(?:student|school|program)", re.I)),
+    ("대학원", re.compile(r"대학원생?|석사과정|박사과정|\bgraduate\s+(?:student|school|program)", re.I)),
     ("학부", re.compile(r"학부생|학부\s*과정|undergraduate", re.I)),
 )
 STATUS_PATTERN = re.compile(r"편입(?:생|학)?|재입학|휴학(?:생|\s*중)?|복학|외국인\s*(?:유학생)?|졸업\s*유예|재학\s*(?:생|중)"
@@ -150,14 +150,21 @@ def numbers_in(text: str, *, answer: bool = False) -> set[str]:
 
 
 def check_grounding(answer: str, evidence_texts, user_texts) -> dict:
-    """답변의 수치가 인용 근거나 사용자가 말한 값에 있는지 확인한다.
+    """답변 수치를 인용 근거와 대조한다. 사용자가 밝힌 입학년도·적용 연도만 별도로 허용한다.
 
     반환: {"checked": 검사한 수치 수, "unsupported": [근거에 없는 수치], "verified": bool}
     """
     claimed = numbers_in(answer, answer=True)
     allowed = set()
-    for text in list(evidence_texts) + list(user_texts):
+    for text in evidence_texts:
         allowed |= numbers_in(text or "")
+    for text in user_texts:
+        for pattern in ADMISSION_PATTERNS:
+            for match in pattern.finditer(text or ""):
+                allowed |= numbers_in(match.group(1)) | {_admission_year(match.group(1))}
+        for match in EFFECTIVE_PATTERN.finditer(text or ""):
+            if match.group(1):
+                allowed.add(match.group(1))
     unsupported = sorted(claimed - allowed, key=float)
     return {"checked": len(claimed), "unsupported": unsupported, "verified": not unsupported}
 

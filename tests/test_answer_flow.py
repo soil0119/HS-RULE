@@ -30,6 +30,15 @@ class ConditionDetectionTests(unittest.TestCase):
         self.assertEqual(detect_conditions(["2015학년도에 입학했어요"])["admission_year"], ["2015"])
         self.assertEqual(detect_conditions(["I was admitted in 2014."])["admission_year"], ["2014"])
 
+    def test_english_undergraduate_is_not_a_graduate_program(self):
+        for text, expected in (("I am an undergraduate student.", ["학부"]),
+                               ("I am in an undergraduate program.", ["학부"]),
+                               ("I am a graduate student.", ["대학원"]),
+                               ("We are graduate students.", ["대학원"]),
+                               ("I attend graduate school.", ["대학원"])):
+            with self.subTest(text=text):
+                self.assertEqual(detect_conditions([text]).get("program", []), expected)
+
     def test_questions_without_conditions_find_nothing(self):
         self.assertEqual(detect_conditions(["졸업하려면 몇 학점 필요해요?", "무슨 학과든 같나요?"]), {})
         self.assertNotIn("admission_year", detect_conditions(["2026년 3월부터 적용되나요?"]))
@@ -68,7 +77,19 @@ class GroundingCheckTests(unittest.TestCase):
         bad = check_grounding("졸업에는 120학점이 필요합니다.", evidence, [])
         self.assertEqual(bad["unsupported"], ["120"])
         user = check_grounding("2014학번이시면 140학점입니다.", evidence, ["저는 2014학번이에요"])
-        self.assertTrue(user["verified"])  # 사용자가 말한 값은 근거 없이도 쓸 수 있다
+        self.assertTrue(user["verified"])  # 사용자가 밝힌 입학년도는 근거 없이도 쓸 수 있다
+
+    def test_user_question_does_not_ground_a_regulation_figure(self):
+        result = check_grounding("졸업에는 150학점이 필요합니다(제34조).", [CREDIT_MAIN["content"]],
+                                 ["저는 2014학번이에요", "졸업학점 150학점 맞나요?"])
+        self.assertEqual(result["unsupported"], ["150"])
+        self.assertFalse(result["verified"])
+
+    def test_explicit_user_years_remain_allowed(self):
+        for answer, user in (("2014학번이시면 130학점입니다.", "저는 14학번이에요"),
+                             ("2026년 기준으로 130학점입니다.", "2026년 기준으로 알려 주세요")):
+            with self.subTest(user=user):
+                self.assertTrue(check_grounding(answer, [CREDIT_MAIN["content"]], [user])["verified"])
 
 
 class AnswerFlowTests(unittest.TestCase):
@@ -104,6 +125,15 @@ class AnswerFlowTests(unittest.TestCase):
         self.assertIn("130학점", result["answer"])
         self.assertIn("120", model.seen[1][-1].content)  # 고쳐 쓰기 요청에 어긋난 수치를 알린다
         self.assertEqual(len(model.seen), 2)
+
+    def test_incorrect_figure_from_user_question_is_repaired(self):
+        answerer, _ = self.answerer(reply("졸업에는 150학점이 필요합니다(제34조).", ["S1"]),
+                                    reply("졸업에는 130학점 이상이 필요합니다(제34조).", ["S1"]),
+                                    hits=(CREDIT_MAIN,))
+        result = answerer.answer("졸업학점 150학점 맞나요?")
+        self.assertTrue(result["grounding"]["repaired"])
+        self.assertIn("130학점", result["answer"])
+        self.assertNotIn("150학점", result["answer"])
 
     def test_figure_still_unsupported_after_repair_is_flagged(self):
         answerer, _ = self.answerer(reply("졸업에는 120학점이 필요합니다(제34조).", ["S1"]),
