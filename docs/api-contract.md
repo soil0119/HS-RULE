@@ -2,7 +2,7 @@
 
 ## 실행과 설정
 
-Python 3.11에서 웹 의존성을 설치합니다. PostgreSQL에는 기존 테이블과 독립된 `web_documents`와 `web_document_pages`를 초기화합니다. `python -m hsrule_web.documents`는 같은 설정으로 다시 실행할 수 있습니다.
+Python 3.11에서 웹 의존성을 설치합니다. PostgreSQL에는 기존 테이블과 독립된 `web_documents`와 `web_document_pages`를 초기화합니다. `python -m hsrule_web.documents`는 versioned migration을 적용하며 같은 설정으로 다시 실행할 수 있습니다. 앱 전용 최소 권한 계정, 저장소 점검, 백업·복원은 [문서 저장소 운영](document-store-ops.md)을 따릅니다.
 
 ```sh
 python -m pip install -r requirements-web.txt

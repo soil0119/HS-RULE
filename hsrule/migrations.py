@@ -7,7 +7,10 @@
 import re
 from pathlib import Path
 
+from psycopg2 import sql
+
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+HISTORY_TABLE = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 DESTRUCTIVE = re.compile(r"\b(?:DROP\s+(?:TABLE|COLUMN|DATABASE|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b", re.IGNORECASE)
 
 
@@ -30,18 +33,26 @@ def check_non_destructive(paths: list[Path]) -> None:
             raise MigrationError(f"{path.name}에 데이터를 지우는 문장이 있습니다: {found.group(0)}")
 
 
-def apply_migrations(cursor, directory: Path | None = None) -> list[str]:
-    """적용되지 않은 migration만 순서대로 실행하고 적용한 파일 이름을 반환한다."""
+def apply_migrations(cursor, directory: Path | None = None,
+                     history_table: str = "hs_reg_migrations") -> list[str]:
+    """적용되지 않은 migration만 순서대로 실행하고 적용한 파일 이름을 반환한다.
+
+    history_table은 migration 묶음마다 따로 둔다(공식 색인 hs_reg_migrations, 웹 문서 web_migrations).
+    cursor는 dict 행(RealDictCursor)을 반환해야 한다.
+    """
+    if not HISTORY_TABLE.fullmatch(history_table):
+        raise MigrationError(f"이력 테이블 이름이 올바르지 않습니다: {history_table!r}")
+    table = sql.Identifier(history_table)
     paths = migration_files(directory)
     check_non_destructive(paths)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS hs_reg_migrations (
+    cursor.execute(sql.SQL("""
+        CREATE TABLE IF NOT EXISTS {} (
             name text PRIMARY KEY,
             checksum text NOT NULL,
             applied_at timestamptz NOT NULL DEFAULT now()
         )
-    """)
-    cursor.execute("SELECT name, checksum FROM hs_reg_migrations")
+    """).format(table))
+    cursor.execute(sql.SQL("SELECT name, checksum FROM {}").format(table))
     applied_before = {row["name"]: row["checksum"] for row in cursor.fetchall()}
     applied = []
     for path in paths:
@@ -53,6 +64,7 @@ def apply_migrations(cursor, directory: Path | None = None) -> list[str]:
                 raise MigrationError(f"{path.name}이 적용 후 수정되었습니다. 새 번호의 migration을 추가하세요.")
             continue
         cursor.execute(path.read_text(encoding="utf-8"))
-        cursor.execute("INSERT INTO hs_reg_migrations (name, checksum) VALUES (%s, %s)", (path.name, checksum))
+        cursor.execute(sql.SQL("INSERT INTO {} (name, checksum) VALUES (%s, %s)").format(table),
+                       (path.name, checksum))
         applied.append(path.name)
     return applied
