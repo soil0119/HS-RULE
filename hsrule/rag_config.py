@@ -1,10 +1,13 @@
-"""RAG 설정 (#27). LLM 제공자(Gemini·Groq)와 모델은 설정으로만 고르고, 종료된 모델은 기본값으로 쓰지 않는다."""
+"""RAG 설정 (#27). LLM 제공자(Gemini·Groq)와 모델은 설정으로만 고르고, 종료된 모델은 기본값으로 쓰지 않는다.
+
+기본 제공자는 Groq다. Gemini 무료 등급은 프로젝트별로 자격이 갈려(시연 당시 billing 요구) 확실히 무료라고
+보장할 수 없는 반면, Groq는 가입만 하면 바로 무료 한도를 쓸 수 있다."""
 import os
 import re
 from dataclasses import dataclass
 
 PROVIDERS = ("gemini", "groq")
-DEFAULT_PROVIDER = "gemini"
+DEFAULT_PROVIDER = "groq"
 # 종료되었거나 지원 목록에서 빠진 모델. 설정에 있어도 거부한다.
 RETIRED_GROQ_MODELS = frozenset({"meta-llama/llama-4-scout-17b-16e-instruct"})
 RETIRED_GEMINI_MODELS = frozenset({"gemini-2.0-flash", "gemini-2.0-flash-lite"})

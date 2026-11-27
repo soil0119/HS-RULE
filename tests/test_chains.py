@@ -141,13 +141,18 @@ class SettingsTests(unittest.TestCase):
                                          "GROQ_MODEL": "openai/gpt-oss-120b"})
         self.assertEqual((settings.provider, settings.model), ("groq", "openai/gpt-oss-120b"))
 
-    def test_gemini_is_default_provider(self):
-        settings = RagSettings.from_env({"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"})
-        self.assertEqual((settings.provider, settings.api_key, settings.model), ("gemini", "k", "gemini-3.5-flash"))
-        with self.assertRaises(RagConfigError):  # 기본 제공자는 Gemini라 GROQ 값만으로는 시작할 수 없다
-            RagSettings.from_env({"GROQ_API_KEY": "k", "GROQ_MODEL": "openai/gpt-oss-120b"})
+    def test_groq_is_default_provider(self):
+        settings = RagSettings.from_env({"GROQ_API_KEY": "k", "GROQ_MODEL": "openai/gpt-oss-120b"})
+        self.assertEqual((settings.provider, settings.api_key, settings.model), ("groq", "k", "openai/gpt-oss-120b"))
+        with self.assertRaises(RagConfigError):  # 기본 제공자는 Groq라 GEMINI 값만으로는 시작할 수 없다
+            RagSettings.from_env({"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"})
         with self.assertRaises(RagConfigError):
-            RagSettings.from_env({"GEMINI_API_KEY": "k"})
+            RagSettings.from_env({"GROQ_API_KEY": "k"})
+
+    def test_gemini_provider_can_still_be_selected(self):
+        settings = RagSettings.from_env({"LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k",
+                                         "GEMINI_MODEL": "gemini-3.5-flash"})
+        self.assertEqual((settings.provider, settings.api_key, settings.model), ("gemini", "k", "gemini-3.5-flash"))
         with self.assertRaises(RagConfigError):
             RagSettings.from_env({"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-2.0-flash"})
         with self.assertRaises(RagConfigError):
@@ -163,14 +168,16 @@ class SettingsTests(unittest.TestCase):
     def test_gemini_llm_is_built_without_calling_the_network(self):
         from hsrule.rag_config import create_llm
 
-        llm = create_llm(RagSettings.from_env({"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}))
+        llm = create_llm(RagSettings.from_env({"LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k",
+                                              "GEMINI_MODEL": "gemini-3.5-flash"}))
         self.assertEqual(type(llm).__name__, "ChatGoogleGenerativeAI")
         self.assertIsNone(llm.temperature)  # Gemini 3 이후는 요청에 temperature를 넣지 않고 권장 기본값을 쓴다
-        older = create_llm(RagSettings.from_env({"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-2.5-flash"}))
+        older = create_llm(RagSettings.from_env({"LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k",
+                                                "GEMINI_MODEL": "gemini-2.5-flash"}))
         self.assertEqual(older.temperature, 0.0)
 
     def test_retrieval_k_is_validated(self):
-        base = {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}
+        base = {"LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "k", "GEMINI_MODEL": "gemini-3.5-flash"}
         self.assertEqual(RagSettings.from_env(dict(base, RAG_RETRIEVAL_K="8")).retrieval_k, 8)
         for bad in ("abc", "0", "13", "-1"):
             with self.subTest(bad=bad), self.assertRaises(RagConfigError):
