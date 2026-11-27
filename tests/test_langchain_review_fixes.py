@@ -207,7 +207,8 @@ class ScriptedLLM(GenericFakeChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         action, value, seconds = self.script.pop(0)
-        self.calls.append({"at": self.clock.now, "timeout": kwargs.get("timeout")})
+        self.calls.append({"at": self.clock.now, "timeout": kwargs.get("timeout"),
+                           "temperature": kwargs.get("temperature")})
         self.clock.now += seconds
         if action == "raise":
             raise value

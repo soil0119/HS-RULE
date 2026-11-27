@@ -40,6 +40,11 @@ class RagSettings:
             raise RagConfigError(f"{key_name}가 설정되지 않았습니다.")
         if not model:
             raise RagConfigError(f"{model_name}이 설정되지 않았습니다. 현재 지원 모델을 직접 지정하세요.")
+        if provider == "gemini":
+            for name in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"):
+                if env.get(name, "").strip().lower() in ("true", "1"):
+                    # google-genai가 이 변수를 보면 키를 Vertex AI로 보내 AI Studio 키가 거부된다.
+                    raise RagConfigError(f"{name}가 켜져 있습니다. AI Studio 키(Gemini API)를 쓰려면 이 변수를 지우세요.")
         if model in _RETIRED[provider]:
             raise RagConfigError(f"{model}은(는) 종료된 모델입니다. 현재 지원 모델을 지정하세요.")
         raw_k = env.get("RAG_RETRIEVAL_K", "").strip() or "6"
@@ -58,7 +63,10 @@ def create_llm(settings: RagSettings):
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         # provider 자체 재시도는 끈다(attempts=1). 재시도는 요청 마감을 아는 hsrule.chains.invoke_within이 맡는다(#51).
-        options = {"model": settings.model, "google_api_key": settings.api_key, "max_retries": 1, "timeout": 60}
+        # Gemini Developer API(AI Studio 키)로 고정한다. 키는 x-goog-api-key 헤더로 보내므로 새 형식(AQ.) 키도 쓸 수 있다.
+        # vertexai를 비워 두면 GOOGLE_GENAI_USE_VERTEXAI 같은 환경변수에 따라 Vertex AI로 바뀔 수 있다.
+        options = {"model": settings.model, "google_api_key": settings.api_key, "max_retries": 1, "timeout": 60,
+                   "vertexai": False}
         generation = _gemini_generation(settings.model)
         # Gemini 3 이후 모델은 Google이 기본 temperature 유지를 권고한다(낮추면 반복·품질 저하 가능).
         # 이 경우 값을 넘기지 않아 라이브러리 기본값을 따른다.

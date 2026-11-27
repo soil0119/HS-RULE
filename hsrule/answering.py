@@ -9,7 +9,7 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field, ValidationError
 
-from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_timeout_error, label_documents
+from hsrule.chains import ANSWER_SYSTEM, RegulationChain, is_generation_failure, is_rate_limited, is_timeout_error
 from hsrule.conditions import (GROUNDING_NOTICE, attach_questions, check_grounding, clarification,
                                detect_conditions, format_conditions)
 
@@ -27,7 +27,8 @@ JSON_INSTRUCTION = (
     "- needs_clarification: [근거]의 규정이 입학년도·과정(학부/대학원/학석사연계)·학적 상태·소속 학과·적용 시점에 "
     "따라 달라지는데 질문과 대화 이력, [사용자가 밝힌 조건]에 그 조건이 없을 때만 true. 이때 answer에는 근거로 "
     "확인되는 조건별 규정을 짧게 설명하고, clarifying_questions(최대 2개)로 판단에 필요한 조건만 묻는다. "
-    "이름·연락처·학번 전체 같은 개인정보는 묻지 않는다. 이미 밝힌 조건은 다시 묻지 않는다.\n"
+    "이름·연락처·학번 전체 같은 개인정보는 묻지 않는다. 이미 밝힌 조건은 다시 묻지 않는다. "
+    "조건별 규정을 [근거]로 설명했다면 needs_clarification이 true여도 found는 true이고 citations에 그 라벨을 넣는다.\n"
     "- missing_conditions: admission_year, program, student_status, department, effective_date 중 빠진 조건."
 )
 REPAIR_INSTRUCTION = {
@@ -124,6 +125,11 @@ class CitedAnswerer:
             if is_timeout_error(exc):  # 마감 도달·provider 시간 초과 모두 시간 초과로 구분한다.
                 raise RagError("rag_backend_error", "검색 또는 질문 재작성이 시간 안에 끝나지 않았습니다.",
                                "timeout") from exc
+            if is_rate_limited(exc):
+                raise RagError("rag_backend_error", "모델 호출 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.",
+                               "rate_limit") from exc
+            if is_generation_failure(exc):
+                raise RagError("rag_invalid_response", "질문 재작성 모델의 출력 형식 오류가 반복됐습니다.", "json") from exc
             raise RagError("rag_backend_error", "검색 단계에서 오류가 발생했습니다.", "provider") from exc
         docs = state["docs"]
         user_texts = [question] + [m.get("content", "") for m in messages or [] if m.get("role") == "user"]
@@ -131,11 +137,14 @@ class CitedAnswerer:
         no_clarification = {"needed": False, "questions": [], "missing": [], "dropped_personal_questions": 0}
         if not docs:  # 근거 후보가 없으면 모델을 부르지 않고 거절한다(근거 없음).
             return {"answer": REFUSAL[language], "found": False, "sources": [], "followups": [],
-                    "reason": "no_evidence", "clarification": no_clarification,
+                    "reason": "no_evidence", "clarification": no_clarification, "usage": dict(state["usage"]),
                     "grounding": {"checked": 0, "unsupported": [], "verified": True, "repaired": False}}
         state["provided_conditions"] = provided
         parsed, messages_used = self._ask(state)
         kept, dropped = validate(parsed, docs, include_private=include_private)
+        if not parsed.found and parsed.needs_clarification and kept:
+            # 조건을 되물으면서 근거로 조건별 규정을 설명한 답은 근거가 있는 답이다(#76 시연에서 확인).
+            parsed = parsed.model_copy(update={"found": True})
         by_label = {doc.metadata["label"]: doc for doc in docs}
         grounding = {"checked": 0, "unsupported": [], "verified": True, "repaired": False}
         if parsed.found:
@@ -148,7 +157,7 @@ class CitedAnswerer:
             text = attach_questions(text, asked["questions"], language)
         if not grounding["verified"]:
             text = text.rstrip() + "\n\n" + GROUNDING_NOTICE[language].format(values=", ".join(grounding["unsupported"]))
-        base = {"answer": text, "clarification": asked, "grounding": grounding,
+        base = {"answer": text, "clarification": asked, "grounding": grounding, "usage": dict(state["usage"]),
                 "followups": [f.strip() for f in parsed.followups if f.strip()][:3]}
         if not parsed.found:
             return dict(base, found=False, sources=[])
@@ -192,6 +201,11 @@ class CitedAnswerer:
             except Exception as exc:
                 if is_timeout_error(exc):
                     raise RagError("rag_backend_error", "답변 모델이 시간 안에 응답하지 않았습니다.", "timeout") from exc
+                if is_rate_limited(exc):
+                    raise RagError("rag_backend_error", "모델 호출 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.",
+                                   "rate_limit") from exc
+                if is_generation_failure(exc):
+                    raise RagError("rag_invalid_response", "답변 모델의 출력 형식 오류가 반복됐습니다.", "json") from exc
                 # provider 예외 본문에는 원문이나 키가 섞일 수 있으므로 메시지에 담지 않는다.
                 raise RagError("rag_backend_error", "답변 모델 호출에 실패했습니다.", "provider") from exc
             try:
