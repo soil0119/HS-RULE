@@ -11,6 +11,7 @@ Rehearsal record and manual steps: docs/document-store-ops.md.
 """
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sys
@@ -27,6 +28,7 @@ from hsrule_web.documents import MIGRATION_HISTORY, MIGRATION_LOCK, MIGRATIONS_D
 FORMAT = 1
 MANIFEST = "manifest.json"
 TABLES = ("web_documents", "web_document_pages")  # web_migrations is rebuilt by the migrations
+LOGGER = logging.getLogger(__name__)
 
 
 class BackupError(RuntimeError):
@@ -42,10 +44,17 @@ def _sha256(path: Path) -> str:
 
 
 def _fsync_copy(source: Path, target: Path) -> None:
-    with source.open("rb") as reader, target.open("xb") as writer:
-        shutil.copyfileobj(reader, writer, 1024 * 1024)
-        writer.flush()
-        os.fsync(writer.fileno())
+    created = False
+    try:
+        with source.open("rb") as reader, target.open("xb") as writer:
+            created = True
+            shutil.copyfileobj(reader, writer, 1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+    except BaseException:
+        if created:
+            target.unlink(missing_ok=True)
+        raise
 
 
 def _current_migrations() -> list[list[str]]:
@@ -123,6 +132,26 @@ def verify_backup(backup_dir: Path) -> dict:
     return manifest
 
 
+def _reconcile_restore_files(database_url: str, copied: list[Path]) -> None:
+    """Remove copied files only after a new connection proves their rows did not commit."""
+    try:
+        with closing(psycopg2.connect(database_url, connect_timeout=3)) as conn, conn, conn.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+            cursor.execute("SELECT to_regclass('web_documents')")
+            existing = set()
+            if cursor.fetchone()[0] is not None:
+                cursor.execute("LOCK TABLE web_documents IN EXCLUSIVE MODE")
+                cursor.execute("SELECT id FROM web_documents WHERE id = ANY(%s)",
+                               ([path.stem for path in copied],))
+                existing = {row[0] for row in cursor.fetchall()}
+            for path in copied:
+                if path.stem not in existing:
+                    path.unlink(missing_ok=True)
+    except (psycopg2.Error, OSError):
+        # As in DocumentStore.save, an unknown transaction outcome must preserve the originals.
+        LOGGER.warning("Could not reconcile restored PDF files after a failed COMMIT")
+
+
 def restore_backup(backup_dir: Path, database_url: str, upload_dir: Path) -> dict:
     backup_dir, upload_dir = Path(backup_dir), Path(upload_dir)
     manifest = verify_backup(backup_dir)
@@ -132,8 +161,9 @@ def restore_backup(backup_dir: Path, database_url: str, upload_dir: Path) -> dic
         raise BackupError(f"복원 대상 업로드 폴더가 비어 있지 않습니다: {upload_dir}")
 
     copied = []
-    with closing(psycopg2.connect(database_url, connect_timeout=3)) as conn:
-        try:
+    committing = False
+    try:
+        with closing(psycopg2.connect(database_url, connect_timeout=3)) as conn:
             with conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
                 apply_migrations(cursor, MIGRATIONS_DIR, history_table=MIGRATION_HISTORY)
@@ -152,11 +182,15 @@ def restore_backup(backup_dir: Path, database_url: str, upload_dir: Path) -> dic
                     _fsync_copy(backup_dir / "uploads" / name, upload_dir / name)
                     copied.append(upload_dir / name)
                 # COMMIT happens here; files are already durable, matching how save orders writes.
-        except BaseException:
-            # The target directory was empty, so every file in it is ours to remove.
+                committing = True
+    except BaseException:
+        if committing and copied:
+            _reconcile_restore_files(database_url, copied)
+        else:
+            # No COMMIT was attempted, and the failed connection has been closed.
             for path in copied:
                 path.unlink(missing_ok=True)
-            raise
+        raise
     return manifest
 
 

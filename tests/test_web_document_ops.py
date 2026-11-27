@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, redirect_stdout
+from contextlib import closing, nullcontext, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from threading import Barrier, Event, current_thread
@@ -549,6 +549,136 @@ class DocumentStoreOpsTests(unittest.TestCase):
         with self.assertRaises(BackupError):
             create_backup(self.dsn, self.upload_dir, backup_dir)
         self.assertFalse(backup_dir.exists())
+
+    def test_restore_removes_partial_pdfs_after_a_copy_failure_and_allows_retry(self):
+        from hsrule_web import backup
+
+        self.store.initialize()
+        for text in ("First restored PDF", "Second restored PDF"):
+            self.store.save(make_pdf(text), "restore.pdf")
+        backup_dir = self.upload_dir.parent / "backup"
+        backup.create_backup(self.dsn, self.upload_dir, backup_dir)
+        target_dsn, target_dir = self.target()
+        copyfileobj = backup.shutil.copyfileobj
+        copies = 0
+
+        def fail_during_second_pdf(reader, writer, *args):
+            nonlocal copies
+            copies += 1
+            if copies == 2:
+                writer.write(reader.read(8))
+                raise OSError("test: disk full after a partial PDF write")
+            return copyfileobj(reader, writer, *args)
+
+        with patch.object(backup.shutil, "copyfileobj", fail_during_second_pdf), self.assertRaises(OSError):
+            backup.restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(list(target_dir.iterdir()), [])
+        with closing(psycopg2.connect(target_dsn)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('web_documents'), to_regclass('web_migrations')")
+            self.assertEqual(cur.fetchone(), (None, None))
+        backup.restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(self.rows_at(target_dsn), self.rows())
+
+    def test_restore_preserves_pdfs_after_a_lost_commit_acknowledgement(self):
+        from hsrule_web import backup
+        from hsrule_web.storage_check import check_storage
+
+        self.store.initialize()
+        data = make_pdf("Committed restored original")
+        document = self.store.save(data, "restore.pdf")
+        backup_dir = self.upload_dir.parent / "backup"
+        backup.create_backup(self.dsn, self.upload_dir, backup_dir)
+        connect = psycopg2.connect
+
+        class AcknowledgementLost(connection):
+            def __exit__(self, exc_type, exc, traceback):
+                result = super().__exit__(exc_type, exc, traceback)
+                if exc_type is None:
+                    raise psycopg2.OperationalError("test: COMMIT response lost after server commit")
+                return result
+
+        for recovery_available in (True, False):
+            with self.subTest(recovery_available=recovery_available):
+                target_dsn, target_dir = self.target()
+                first_connection = True
+
+                def connect_for_restore(dsn, **options):
+                    nonlocal first_connection
+                    if first_connection:
+                        first_connection = False
+                        return connect(dsn, connection_factory=AcknowledgementLost, **options)
+                    if not recovery_available:
+                        raise psycopg2.OperationalError("test: database unreachable during recovery")
+                    return connect(dsn, **options)
+
+                with patch.object(backup.psycopg2, "connect", side_effect=connect_for_restore), \
+                        self.assertRaises(psycopg2.OperationalError), \
+                        (self.assertLogs("hsrule_web.backup", level="WARNING")
+                         if not recovery_available else nullcontext()):
+                    backup.restore_backup(backup_dir, target_dsn, target_dir)
+                self.assertEqual(self.rows_at(target_dsn), self.rows())
+                restored_pdf = target_dir / f"{document.id}.pdf"
+                self.assertTrue(restored_pdf.is_file(), "committed PDF was removed after the lost acknowledgement")
+                self.assertEqual(restored_pdf.read_bytes(), data)
+                self.assertEqual(check_storage(target_dsn, target_dir, verify_hash=True), [])
+
+    def test_restore_removes_pdfs_after_a_proven_commit_rollback(self):
+        from hsrule_web.backup import create_backup, restore_backup
+
+        self.store.initialize()
+        self.store.save(make_pdf("Rejected restored original"), "restore.pdf")
+        backup_dir = self.upload_dir.parent / "backup"
+        create_backup(self.dsn, self.upload_dir, backup_dir)
+        target_dsn, target_dir = self.target()
+        self.make_store(target_dsn).initialize()
+        with closing(psycopg2.connect(target_dsn)) as conn, conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE allowed_filenames (filename text PRIMARY KEY)")
+            cur.execute("ALTER TABLE web_documents ADD CONSTRAINT allowed_filename FOREIGN KEY (filename) "
+                        "REFERENCES allowed_filenames(filename) DEFERRABLE INITIALLY DEFERRED")
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(self.rows_at(target_dsn), ([], []))
+        self.assertEqual(list(target_dir.iterdir()), [])
+        with closing(psycopg2.connect(target_dsn)) as conn, conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE web_documents DROP CONSTRAINT allowed_filename")
+        restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(self.rows_at(target_dsn), self.rows())
+
+    def test_restore_removes_pdfs_when_a_new_schema_rolls_back_at_commit(self):
+        from hsrule_web import backup
+
+        self.store.initialize()
+        self.store.save(make_pdf("Uncommitted restored original"), "restore.pdf")
+        backup_dir = self.upload_dir.parent / "backup"
+        backup.create_backup(self.dsn, self.upload_dir, backup_dir)
+        target_dsn, target_dir = self.target()
+        connect = psycopg2.connect
+
+        class RolledBackAtCommit(connection):
+            def __exit__(self, exc_type, exc, traceback):
+                if exc_type is None:
+                    self.rollback()
+                    raise psycopg2.OperationalError("test: restore transaction rolled back at COMMIT")
+                return super().__exit__(exc_type, exc, traceback)
+
+        first_connection = True
+
+        def connect_for_restore(dsn, **options):
+            nonlocal first_connection
+            if first_connection:
+                first_connection = False
+                return connect(dsn, connection_factory=RolledBackAtCommit, **options)
+            return connect(dsn, **options)
+
+        with patch.object(backup.psycopg2, "connect", side_effect=connect_for_restore), \
+                self.assertRaises(psycopg2.OperationalError):
+            backup.restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(list(target_dir.iterdir()), [])
+        with closing(psycopg2.connect(target_dsn)) as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('web_documents'), to_regclass('web_migrations')")
+            self.assertEqual(cur.fetchone(), (None, None))
+        backup.restore_backup(backup_dir, target_dsn, target_dir)
+        self.assertEqual(self.rows_at(target_dsn), self.rows())
 
     def test_restore_refuses_unsafe_targets_and_damaged_backups(self):
         from hsrule_web.backup import BackupError, create_backup, restore_backup
